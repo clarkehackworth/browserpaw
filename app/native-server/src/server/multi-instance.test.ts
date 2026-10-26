@@ -71,7 +71,7 @@ describe('multi-instance port negotiation', () => {
     expect(started).toBeDefined();
     const boundPort: number = started.payload.port;
     expect(boundPort).toBeGreaterThan(base);
-    expect(boundPort).toBeLessThanOrEqual(base + 32);
+    expect(boundPort).toBeLessThanOrEqual(base + 10);
 
     // Registry entry published for the new port
     const entries = await readBridgeRegistryEntries();

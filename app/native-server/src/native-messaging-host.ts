@@ -483,7 +483,7 @@ export class NativeMessagingHost {
         // The requested port is held by another BrowserPaw bridge (a
         // different browser instance) and we are not operator-pinned:
         // scan upward for the next free port.
-        const MAX_SCAN = 32;
+        const MAX_SCAN = 10; // 12306..12316 — mirrors the shim's discovery range
         console.error(
           `[NativeHost] Port ${port} is held by another bridge; scanning for a free port...`,
         );

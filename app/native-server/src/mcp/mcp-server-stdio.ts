@@ -68,8 +68,46 @@ const EXPOSED_TOOLS = filterToolSchemas(TOOL_SCHEMAS, TOOL_PROFILE);
 // Dynamic tool activation store for stdio session
 const dynamicExtraTools = new Set<string>();
 
-// Resolve MCP target URL from environment, the local bridge registry, or configuration
-const resolveTargetUrl = async (): Promise<string> => {
+// Identity-based discovery: probe a small port range and attach to the bridge
+// whose /ping reports the requested instance name. This works cross-machine
+// (e.g. bridges running on another host behind an SSH tunnel) where they
+// cannot publish to this host's local registry. The range mirrors the
+// bridge's own sticky bind-scan range.
+const DISCOVERY_BASE_PORT = 12306;
+const DISCOVERY_PORT_SPAN = 10; // probe 12306..12316 inclusive
+
+export const probeBridgeInstanceName = async (
+  port: number,
+  timeoutMs = 1000,
+): Promise<string | null> => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/ping`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json().catch(() => null)) as {
+      bridgeInstanceName?: unknown;
+    } | null;
+    return typeof data?.bridgeInstanceName === 'string' ? data.bridgeInstanceName : null;
+  } catch {
+    return null; // Connection refused / timeout / bad JSON — no bridge here
+  }
+};
+
+export const discoverBridgePortForInstance = async (
+  instanceName: string,
+): Promise<number | null> => {
+  for (let port = DISCOVERY_BASE_PORT; port <= DISCOVERY_BASE_PORT + DISCOVERY_PORT_SPAN; port++) {
+    if ((await probeBridgeInstanceName(port)) === instanceName) {
+      return port;
+    }
+  }
+  return null;
+};
+
+// Resolve MCP target URL from environment, the local bridge registry,
+// identity-based port probing, or configuration
+export const resolveTargetUrl = async (): Promise<string> => {
   selectedBridge = null;
   if (process.env.MCP_SERVER_URL) {
     return process.env.MCP_SERVER_URL;
@@ -79,39 +117,41 @@ const resolveTargetUrl = async (): Promise<string> => {
   if (port) {
     return `http://${host}:${port}/mcp`;
   }
-  // Auto-discover a running local bridge via the registry (multi-instance
-  // support). Explicit env configuration above always wins; remote/tunnel
-  // setups keep working because the registry stays empty on the client host.
-  try {
-    const instance = (process.env.BROWSERPAW_INSTANCE || '').trim();
-    const entries = await readBridgeRegistryEntries();
-    if (entries.length > 0) {
-      if (instance) {
-        const match = entries.filter((e) => e.instanceName === instance);
-        if (match.length === 1) {
-          selectedBridge = match[0];
-          return `http://127.0.0.1:${match[0].port}/mcp`;
-        }
-        const available = entries.map((e) => e.instanceName || '<unnamed>').join(', ');
-        throw new BridgeSelectionError(
-          instance && match.length > 1
-            ? `Multiple bridges registered for instance "${instance}".`
-            : `No bridge registered for instance "${instance}". Available instances: ${available}.`,
-        );
-      }
-      if (entries.length === 1) {
-        selectedBridge = entries[0];
-        return `http://127.0.0.1:${entries[0].port}/mcp`;
-      }
-      const available = entries.map((e) => e.instanceName || `<unnamed port ${e.port}>`).join(', ');
-      throw new BridgeSelectionError(
-        `Multiple BrowserPaw bridges are running (${available}). Set BROWSERPAW_INSTANCE to select one, or CHROME_MCP_PORT to pin a port.`,
-      );
+  const instance = (process.env.BROWSERPAW_INSTANCE || '').trim();
+  // A failed registry read must not mask discovery; treat it as "no entries".
+  const entries = await readBridgeRegistryEntries().catch(() => [] as BridgeRegistryEntry[]);
+  if (instance) {
+    // 1) Fast path: local registry entry for this instance
+    const match = entries.filter((e) => e.instanceName === instance);
+    if (match.length === 1) {
+      selectedBridge = match[0];
+      return `http://127.0.0.1:${match[0].port}/mcp`;
     }
-  } catch (err) {
-    // Explicit selection failures are fatal; transient fs errors fall through
-    // to the stdio-config / default resolution below.
-    if (err instanceof BridgeSelectionError) throw err;
+    if (match.length > 1) {
+      throw new BridgeSelectionError(`Multiple bridges registered for instance "${instance}".`);
+    }
+    // 2) Identity probe: the bridge may be running elsewhere (e.g. across an
+    // SSH tunnel) where it cannot publish to this host's registry.
+    const probed = await discoverBridgePortForInstance(instance);
+    if (probed) {
+      return `http://127.0.0.1:${probed}/mcp`;
+    }
+    const available = entries.map((e) => e.instanceName || '<unnamed>').join(', ');
+    throw new BridgeSelectionError(
+      `No bridge found for instance "${instance}" (registry ${
+        available ? `has: ${available}` : 'is empty'
+      }; probed ports ${DISCOVERY_BASE_PORT}-${DISCOVERY_BASE_PORT + DISCOVERY_PORT_SPAN}).`,
+    );
+  }
+  if (entries.length > 0) {
+    if (entries.length === 1) {
+      selectedBridge = entries[0];
+      return `http://127.0.0.1:${entries[0].port}/mcp`;
+    }
+    const available = entries.map((e) => e.instanceName || `<unnamed port ${e.port}>`).join(', ');
+    throw new BridgeSelectionError(
+      `Multiple BrowserPaw bridges are running (${available}). Set BROWSERPAW_INSTANCE to select one, or CHROME_MCP_PORT to pin a port.`,
+    );
   }
   try {
     const configPath = path.join(__dirname, 'stdio-config.json');
