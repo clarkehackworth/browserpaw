@@ -1,6 +1,7 @@
 import { formatErrorForAgent, NativeMessageType } from 'chrome-mcp-shared';
 import { BACKGROUND_MESSAGE_TYPES } from '@/common/message-types';
 import { NATIVE_HOST, STORAGE_KEYS, ERROR_MESSAGES, SUCCESS_MESSAGES } from '@/common/constants';
+import { checkBridgeOwnership } from '@/common/bridge-ownership';
 import { handleCallTool } from './tools';
 import { acquireKeepalive } from './keepalive-manager';
 
@@ -34,7 +35,13 @@ function clearHandshakeTimer(): void {
   }
 }
 
-async function verifyServerViaHttp(port: number): Promise<boolean> {
+interface BridgeProbe {
+  alive: boolean;
+  origin?: string;
+  instanceName?: string;
+}
+
+async function probeBridge(port: number): Promise<BridgeProbe> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 1200);
@@ -42,12 +49,43 @@ async function verifyServerViaHttp(port: number): Promise<boolean> {
     clearTimeout(timer);
     if (res.ok) {
       const data = await res.json().catch(() => ({}));
-      return data.status === 'ok' || data.message === 'pong' || res.status === 200;
+      const alive = data.status === 'ok' || data.message === 'pong' || res.status === 200;
+      return {
+        alive,
+        origin: typeof data.bridgeOrigin === 'string' ? data.bridgeOrigin : undefined,
+        instanceName:
+          typeof data.bridgeInstanceName === 'string' ? data.bridgeInstanceName : undefined,
+      };
     }
   } catch {
     // Ignore error
   }
-  return false;
+  return { alive: false };
+}
+
+/**
+ * This extension instance's identity, as reported to the bridge in the START
+ * handshake and used to verify bridge ownership before self-heal attach.
+ */
+async function getOwnIdentity(): Promise<{ origin: string; instanceName?: string }> {
+  let instanceName: string | undefined;
+  try {
+    const rawResult = await Promise.resolve(
+      chrome?.storage?.local?.get?.([STORAGE_KEYS.INSTANCE_NAME]),
+    ).catch(() => ({}));
+    const result: Record<string, any> = rawResult || {};
+    const raw = result[STORAGE_KEYS.INSTANCE_NAME];
+    if (typeof raw === 'string' && raw.trim()) instanceName = raw.trim();
+  } catch (error) {
+    console.warn(`${LOG_PREFIX} Failed to load instance name`, error);
+  }
+  let origin = '';
+  try {
+    origin = chrome.runtime.getURL('/');
+  } catch {
+    // chrome.runtime unavailable; ownership check degrades to name-only
+  }
+  return { origin, instanceName };
 }
 
 /**
@@ -573,25 +611,43 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
           } else {
             console.error('Error from native host:', errorMsg);
           }
-          // If error indicates already running or port occupied, self-heal via HTTP /ping probe immediately
+          // If error indicates already running or port occupied, self-heal via HTTP /ping probe
+          // immediately — but only after verifying the bridge on that port belongs to THIS
+          // extension instance (multi-instance safety).
           if (isBenign) {
             const targetPort = port || currentServerStatus.port || NATIVE_HOST.DEFAULT_PORT;
-            verifyServerViaHttp(targetPort).then(async (isAlive) => {
-              if (isAlive) {
-                clearHandshakeTimer();
-                currentServerStatus = {
-                  isRunning: true,
-                  port: targetPort,
-                  lastUpdated: Date.now(),
-                };
-                await saveServerStatus(currentServerStatus);
-                broadcastServerStatusChange(currentServerStatus);
-                resetReconnectState();
-                console.log(
-                  `${LOG_PREFIX} Self-healed existing running server via HTTP /ping on port ${targetPort}`,
+            void (async () => {
+              const probe = await probeBridge(targetPort);
+              if (!probe.alive) return;
+              const own = await getOwnIdentity();
+              const verdict = checkBridgeOwnership(probe, own.origin, own.instanceName);
+              if (verdict === 'foreign') {
+                console.error(
+                  `${LOG_PREFIX} Refusing to attach: port ${targetPort} is held by a different BrowserPaw instance${
+                    probe.instanceName ? ` ("${probe.instanceName}")` : ''
+                  }. Give this profile its own port: chrome.storage.local.set({nativeServerPort: <port>}).`,
+                );
+                await markServerStopped(`foreign_bridge_on_port_${targetPort}`);
+                return;
+              }
+              if (verdict === 'ambiguous' && !own.instanceName) {
+                console.warn(
+                  `${LOG_PREFIX} Attached to a bridge on a busy port without verified ownership (no instance name set). Set one per profile: chrome.storage.local.set({instanceName: "name"}).`,
                 );
               }
-            });
+              clearHandshakeTimer();
+              currentServerStatus = {
+                isRunning: true,
+                port: targetPort,
+                lastUpdated: Date.now(),
+              };
+              await saveServerStatus(currentServerStatus);
+              broadcastServerStatusChange(currentServerStatus);
+              resetReconnectState();
+              console.log(
+                `${LOG_PREFIX} Self-healed existing running server via HTTP /ping on port ${targetPort}`,
+              );
+            })();
           }
         } else if (message.type === 'file_operation_response') {
           const reqId = message.responseToRequestId;
@@ -651,7 +707,13 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
     });
 
     clearHandshakeTimer();
-    safePostMessage(nativePort, { type: NativeMessageType.START, payload: { port } });
+    void (async () => {
+      const own = await getOwnIdentity();
+      safePostMessage(nativePort, {
+        type: NativeMessageType.START,
+        payload: { port, origin: own.origin, instanceName: own.instanceName },
+      });
+    })();
 
     // Self-healing handshake watchdog: If SERVER_STARTED is not received within 2s, verify via /ping
     handshakeTimeoutTimer = setTimeout(async () => {
@@ -659,11 +721,17 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
         console.warn(
           `${LOG_PREFIX} Handshake timeout waiting for SERVER_STARTED on port ${port}, probing /ping...`,
         );
-        const isAlive = await verifyServerViaHttp(port);
-        if (isAlive) {
+        const probe = await probeBridge(port);
+        if (probe.alive) {
+          const own = await getOwnIdentity();
+          if (checkBridgeOwnership(probe, own.origin, own.instanceName) === 'foreign') {
+            // A different instance's bridge holds this port; the error path
+            // surfaces the actionable message. Do not attach.
+            return;
+          }
           currentServerStatus = {
             isRunning: true,
-            port,
+            port: port,
             lastUpdated: Date.now(),
           };
           await saveServerStatus(currentServerStatus);
@@ -674,7 +742,11 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
           );
         } else {
           // Re-send start message once before disconnecting
-          safePostMessage(nativePort, { type: NativeMessageType.START, payload: { port } });
+          const own = await getOwnIdentity();
+          safePostMessage(nativePort, {
+            type: NativeMessageType.START,
+            payload: { port, origin: own.origin, instanceName: own.instanceName },
+          });
         }
       }
     }, 2000);
@@ -826,15 +898,18 @@ export const initNativeHostListener = () => {
           currentServerStatus = storedStatus;
           if (!currentServerStatus.isRunning && nativePort) {
             const probePort = currentServerStatus.port || NATIVE_HOST.DEFAULT_PORT;
-            const isAlive = await verifyServerViaHttp(probePort);
-            if (isAlive) {
-              currentServerStatus = {
-                isRunning: true,
-                port: probePort,
-                lastUpdated: Date.now(),
-              };
-              await saveServerStatus(currentServerStatus);
-              broadcastServerStatusChange(currentServerStatus);
+            const probe = await probeBridge(probePort);
+            if (probe.alive) {
+              const own = await getOwnIdentity();
+              if (checkBridgeOwnership(probe, own.origin, own.instanceName) !== 'foreign') {
+                currentServerStatus = {
+                  isRunning: true,
+                  port: probePort,
+                  lastUpdated: Date.now(),
+                };
+                await saveServerStatus(currentServerStatus);
+                broadcastServerStatusChange(currentServerStatus);
+              }
             }
           }
           sendResponse({

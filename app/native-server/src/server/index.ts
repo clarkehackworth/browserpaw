@@ -241,9 +241,14 @@ export class Server {
 
   private setupHealthRoutes(): void {
     this.fastify.get('/ping', async (_request: FastifyRequest, reply: FastifyReply) => {
+      const host = this.nativeHost;
       reply.status(HTTP_STATUS.OK).send({
         status: 'ok',
         message: 'pong',
+        // Identity of the extension instance that owns this bridge, so other
+        // extension instances can verify ownership before self-heal attach.
+        ...(host?.extensionOrigin ? { bridgeOrigin: host.extensionOrigin } : {}),
+        ...(host?.extensionInstanceName ? { bridgeInstanceName: host.extensionInstanceName } : {}),
       });
     });
   }

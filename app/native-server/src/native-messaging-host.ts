@@ -5,6 +5,7 @@ import { NativeMessageType } from 'chrome-mcp-shared';
 import { TIMEOUTS, getChromeMcpPort } from './constant';
 import fileHandler from './file-handler';
 import { getBridgeToken } from './server/token';
+import { writeBridgeRegistryEntry, removeBridgeRegistryEntry } from './server/bridge-registry';
 import { choice } from '@typesafe-ai/sdk';
 import { JevClientWrapper, buildState, isSessionKeyInvalid, HeuristicEngine } from './jev';
 
@@ -14,6 +15,20 @@ interface PendingRequest {
   timeoutId: NodeJS.Timeout;
 }
 
+/** True when the error is a "port already in use" bind failure. */
+function isPortBusyError(err: any): boolean {
+  return (
+    err?.code === 'EADDRINUSE' ||
+    /EADDRINUSE|Port is already in use/i.test(String(err?.message ?? ''))
+  );
+}
+
+// Whether the operator pinned a port via environment AT PROCESS START.
+// Note: Server.start() itself sets CHROME_MCP_PORT/MCP_HTTP_PORT after a
+// successful bind, so the live env must not be consulted later — it would
+// report a self-induced "pin" and disable port scanning.
+const ENV_PINNED_AT_START = Boolean(process.env.CHROME_MCP_PORT || process.env.MCP_HTTP_PORT);
+
 export class NativeMessagingHost {
   private associatedServer: Server | null = null;
   private pendingRequests: Map<string, PendingRequest> = new Map();
@@ -22,6 +37,10 @@ export class NativeMessagingHost {
     { total: number; received: Map<number, string>; timer: NodeJS.Timeout }
   > = new Map();
   public isConnected = false;
+  // Identity of the extension instance that started this bridge (from the
+  // START handshake). Used for ownership verification and registry naming.
+  public extensionOrigin: string | null = null;
+  public extensionInstanceName: string | null = null;
 
   public setServer(serverInstance: Server): void {
     this.associatedServer = serverInstance;
@@ -188,12 +207,24 @@ export class NativeMessagingHost {
     // Handle directive messages from Chrome
     try {
       switch (message.type) {
-        case NativeMessageType.START:
+        case NativeMessageType.START: {
           // An explicit extension port wins; otherwise honor the same
           // environment configuration (CHROME_MCP_PORT > MCP_HTTP_PORT) that
           // HTTP-only clients resolve.
-          await this.startServer(message.payload?.port || getChromeMcpPort());
+          const startPayload = (message.payload || {}) as {
+            port?: number;
+            origin?: string;
+            instanceName?: string;
+          };
+          if (typeof startPayload.origin === 'string' && startPayload.origin) {
+            this.extensionOrigin = startPayload.origin;
+          }
+          if (typeof startPayload.instanceName === 'string' && startPayload.instanceName.trim()) {
+            this.extensionInstanceName = startPayload.instanceName.trim();
+          }
+          await this.startServer(startPayload.port || getChromeMcpPort());
           break;
+        }
         case NativeMessageType.STOP:
           await this.stopServer();
           break;
@@ -420,6 +451,12 @@ export class NativeMessagingHost {
 
   /**
    * Start Fastify server (now accepts Server instance)
+   *
+   * Multi-instance behavior: when the requested port is held by another
+   * bridge and the port is not operator-pinned via environment, scan upward
+   * for the next free port (sticky — the extension remembers the bound port
+   * in its own profile storage) and publish a local registry entry so MCP
+   * clients can discover the bridge by instance name.
    */
   private async startServer(port: number): Promise<void> {
     if (!this.associatedServer) {
@@ -435,11 +472,62 @@ export class NativeMessagingHost {
         return;
       }
 
-      await this.associatedServer.start(port, this);
+      const envPinned = ENV_PINNED_AT_START;
+      let boundPort = port;
+      try {
+        await this.associatedServer.start(port, this);
+      } catch (error: any) {
+        if (!isPortBusyError(error) || envPinned) {
+          throw error;
+        }
+        // The requested port is held by another BrowserPaw bridge (a
+        // different browser instance) and we are not operator-pinned:
+        // scan upward for the next free port.
+        const MAX_SCAN = 32;
+        console.error(
+          `[NativeHost] Port ${port} is held by another bridge; scanning for a free port...`,
+        );
+        for (let candidate = port + 1; candidate <= port + MAX_SCAN; candidate++) {
+          try {
+            await this.associatedServer.start(candidate, this);
+            boundPort = candidate;
+            break;
+          } catch (scanError: any) {
+            if (!isPortBusyError(scanError)) {
+              throw scanError;
+            }
+          }
+        }
+        if (boundPort === port) {
+          this.sendError(
+            `Failed to start server: ports ${port}–${port + MAX_SCAN} are all in use. ` +
+              `Set CHROME_MCP_PORT to a free port for this instance.`,
+          );
+          return;
+        }
+      }
+
+      // Publish registry entry for local auto-discovery (best-effort; the
+      // entry contains the bridge token, file mode is 0600).
+      try {
+        await writeBridgeRegistryEntry({
+          port: boundPort,
+          token: getBridgeToken(),
+          origin: this.extensionOrigin,
+          instanceName: this.extensionInstanceName,
+          pid: process.pid,
+          startedAt: Date.now(),
+        });
+      } catch (registryError: any) {
+        console.warn(
+          '[NativeHost] Failed to write bridge registry entry:',
+          registryError?.message ?? registryError,
+        );
+      }
 
       this.sendMessage({
         type: NativeMessageType.SERVER_STARTED,
-        payload: { port, token: getBridgeToken() },
+        payload: { port: boundPort, token: getBridgeToken() },
       });
     } catch (error: any) {
       this.sendError(`Failed to start server: ${error.message}`);
@@ -466,6 +554,9 @@ export class NativeMessagingHost {
 
       await this.associatedServer.stop();
       // this.serverStarted = false; // Server should update its own status after successful stop
+
+      // Remove registry entry (best-effort)
+      void removeBridgeRegistryEntry(this.extensionOrigin, this.extensionInstanceName);
 
       this.sendMessage({ type: NativeMessageType.SERVER_STOPPED }); // Distinguish from previous 'stopped'
     } catch (error: any) {
@@ -606,6 +697,9 @@ export class NativeMessagingHost {
     this.pendingRequests.clear();
     this.incomingChunks.forEach((record) => clearTimeout(record.timer));
     this.incomingChunks.clear();
+
+    // Remove registry entry (best-effort) before the exit watchdog fires
+    void removeBridgeRegistryEntry(this.extensionOrigin, this.extensionInstanceName);
 
     // 1000ms unref'd watchdog exit timer to prevent orphaned processes from holding port 12306 on Windows
     setTimeout(() => process.exit(0), 1000).unref();

@@ -211,6 +211,7 @@ export const NETWORK_FILTERS = {
 export const STORAGE_KEYS = {
   SERVER_STATUS: 'serverStatus',
   NATIVE_SERVER_PORT: 'nativeServerPort',
+  INSTANCE_NAME: 'instanceName',
   NATIVE_AUTO_CONNECT_ENABLED: 'nativeAutoConnectEnabled',
   USER_PREFERENCES: 'userPreferences',
   // Record & Replay storage keys

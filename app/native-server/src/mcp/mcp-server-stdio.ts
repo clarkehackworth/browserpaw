@@ -28,7 +28,12 @@ import {
 } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import * as fs from 'fs';
 import * as path from 'path';
-import { readBridgeToken } from '../server/token';
+import { readBridgeToken, isValidTokenFormat } from '../server/token';
+import {
+  readBridgeRegistryEntries,
+  BridgeRegistryEntry,
+  BridgeSelectionError,
+} from '../server/bridge-registry';
 import { jevModelManager } from '../server/jev-model-manager';
 
 let stdioMcpServer: Server | null = null;
@@ -37,6 +42,9 @@ let mcpClientGeneration = 0;
 let currentClientGeneration = 0;
 let connectingPromise: Promise<{ client: Client | null; generation: number }> | null = null;
 let connectionError: unknown = null;
+// Bridge entry selected via the local registry (multi-instance auto-discovery).
+// When set, its token is used instead of reading the shared token file.
+let selectedBridge: BridgeRegistryEntry | null = null;
 
 export const getMcpClientGeneration = () => mcpClientGeneration;
 export const getActiveMcpClient = () => mcpClient;
@@ -50,6 +58,7 @@ export const resetMcpClientForTesting = () => {
   currentClientGeneration = 0;
   mcpClientGeneration = 0;
   connectionError = null;
+  selectedBridge = null;
 };
 
 // Profile contract: resolved at startup (default is 'core', set CHROME_MCP_TOOL_PROFILE=full to expose all tools).
@@ -59,8 +68,9 @@ const EXPOSED_TOOLS = filterToolSchemas(TOOL_SCHEMAS, TOOL_PROFILE);
 // Dynamic tool activation store for stdio session
 const dynamicExtraTools = new Set<string>();
 
-// Resolve MCP target URL from environment or configuration
-const resolveTargetUrl = (): string => {
+// Resolve MCP target URL from environment, the local bridge registry, or configuration
+const resolveTargetUrl = async (): Promise<string> => {
+  selectedBridge = null;
   if (process.env.MCP_SERVER_URL) {
     return process.env.MCP_SERVER_URL;
   }
@@ -68,6 +78,40 @@ const resolveTargetUrl = (): string => {
   const port = process.env.CHROME_MCP_PORT || process.env.MCP_HTTP_PORT;
   if (port) {
     return `http://${host}:${port}/mcp`;
+  }
+  // Auto-discover a running local bridge via the registry (multi-instance
+  // support). Explicit env configuration above always wins; remote/tunnel
+  // setups keep working because the registry stays empty on the client host.
+  try {
+    const instance = (process.env.BROWSERPAW_INSTANCE || '').trim();
+    const entries = await readBridgeRegistryEntries();
+    if (entries.length > 0) {
+      if (instance) {
+        const match = entries.filter((e) => e.instanceName === instance);
+        if (match.length === 1) {
+          selectedBridge = match[0];
+          return `http://127.0.0.1:${match[0].port}/mcp`;
+        }
+        const available = entries.map((e) => e.instanceName || '<unnamed>').join(', ');
+        throw new BridgeSelectionError(
+          instance && match.length > 1
+            ? `Multiple bridges registered for instance "${instance}".`
+            : `No bridge registered for instance "${instance}". Available instances: ${available}.`,
+        );
+      }
+      if (entries.length === 1) {
+        selectedBridge = entries[0];
+        return `http://127.0.0.1:${entries[0].port}/mcp`;
+      }
+      const available = entries.map((e) => e.instanceName || `<unnamed port ${e.port}>`).join(', ');
+      throw new BridgeSelectionError(
+        `Multiple BrowserPaw bridges are running (${available}). Set BROWSERPAW_INSTANCE to select one, or CHROME_MCP_PORT to pin a port.`,
+      );
+    }
+  } catch (err) {
+    // Explicit selection failures are fatal; transient fs errors fall through
+    // to the stdio-config / default resolution below.
+    if (err instanceof BridgeSelectionError) throw err;
   }
   try {
     const configPath = path.join(__dirname, 'stdio-config.json');
@@ -98,7 +142,7 @@ export const ensureMcpClient = async (): Promise<Client | null> => {
   thisPromise = (async () => {
     let localClient: Client | null = null;
     try {
-      const targetUrl = new URL(resolveTargetUrl());
+      const targetUrl = new URL(await resolveTargetUrl());
       if (
         targetUrl.protocol !== 'http:' ||
         !['127.0.0.1', 'localhost', '[::1]'].includes(targetUrl.hostname) ||
@@ -107,7 +151,10 @@ export const ensureMcpClient = async (): Promise<Client | null> => {
       ) {
         throw new Error('BrowserPaw credentials may only be sent to a local HTTP bridge.');
       }
-      const token = readBridgeToken();
+      const token =
+        selectedBridge && isValidTokenFormat(selectedBridge.token)
+          ? selectedBridge.token
+          : readBridgeToken();
       const headers = { Authorization: `Bearer ${token}` };
       localClient = new Client(
         { name: 'Mcp Chrome Proxy', version: '1.0.0' },
