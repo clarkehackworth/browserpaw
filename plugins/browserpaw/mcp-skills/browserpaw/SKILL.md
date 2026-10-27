@@ -131,4 +131,5 @@ Execute interactive on-page tasks in a single turn:
 - `references/tool-cheatsheet.md` — Complete contracts and parameter tables for all 50 registered tools.
 - `references/batch-pipeline.md` — Multi-action batch grammar, assertions, network capture, and form pipelines.
 - `references/visual-fallback.md` — Screenshot grid calibration, DPR scaling, and `chrome_computer` coordinates.
+- `references/remote-tunnel.md` — Cross-machine topology: SSH tunnel bootstrap (`scripts/ensure-tunnel.mjs`), stdio preflight wrapper, supervisor loop, remote pitfalls.
 - `config/TROUBLESHOOTING.md` — Port conflicts, token auth, and native host repair.

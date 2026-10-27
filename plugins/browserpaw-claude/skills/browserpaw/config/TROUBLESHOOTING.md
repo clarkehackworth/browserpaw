@@ -178,6 +178,27 @@ Windows users can also double-click [`skill/config/repair.bat`](./repair.bat) or
 
 ---
 
+### 13. Remote Topology: Bridge on a Different Machine (SSH Tunnels)
+
+- **Symptom**:
+  `fetch failed: ECONNREFUSED 127.0.0.1:12306` on the agent machine even though the bridge works fine on the browser machine — or tools that worked suddenly fail after a browser restart.
+- **Root Cause**:
+  The stdio shim is loopback-only by design. When Chrome + the extension run on another machine, that machine's bridge ports must be forwarded into the agent machine's loopback (e.g. `ssh -N -L 12306:127.0.0.1:12306 user@host`). Forwards die on host reboots, and a restarted browser's bridge can land on a different sticky-scan port (12307, 12308, …).
+- **Resolution**:
+  1. Bootstrap/repair forwards idempotently (three-state probe: `bridge-up` / `forward-only` / `no-forward`):
+     ```bash
+     node scripts/ensure-tunnel.mjs <user@host> 12306 12307 12308 12309 12310 12311
+     ```
+  2. For auto-start on every MCP connection, wrap the shim:
+     ```bash
+     node scripts/mcp-stdio-preflight.mjs app/native-server/dist/mcp/mcp-server-stdio.js
+     # with env: BROWSERPAW_TUNNEL_TARGET, BROWSERPAW_TUNNEL_PORTS, [BROWSERPAW_TUNNEL_KEY]
+     ```
+  3. For unattended machines, run the supervisor loop.
+  Full topology, port model, token handling, and pitfalls: `references/remote-tunnel.md`.
+
+---
+
 ## Directory & Component Map
 
 | Component                | Source Path                    | Artifact / Runtime Endpoint                             |

@@ -85,6 +85,24 @@
         }
       }
     },
+    "remote_bridge_preflight": {
+      "_comment": "Cross-machine setup: Chrome + extension run on another machine. The preflight wrapper ensures the ssh -L loopback forwards exist before the shim starts. See skill/references/remote-tunnel.md.",
+      "config": {
+        "mcpServers": {
+          "browserpaw": {
+            "command": "node",
+            "args": [
+              "<ABSOLUTE_PATH_TO_BROWSERPAW>/scripts/mcp-stdio-preflight.mjs",
+              "<ABSOLUTE_PATH_TO_BROWSERPAW>/app/native-server/dist/mcp/mcp-server-stdio.js"
+            ],
+            "env": {
+              "BROWSERPAW_TUNNEL_TARGET": "user@browser-machine",
+              "BROWSERPAW_TUNNEL_PORTS": "12306,12307,12308,12309,12310,12311"
+            }
+          }
+        }
+      }
+    },
     "advanced_manual_http": {
       "_comment": "Advanced manual HTTP/SSE connection examples (not recommended as default, requires active bridge-token from ~/.chrome-mcp/bridge-token).",
       "http": {
