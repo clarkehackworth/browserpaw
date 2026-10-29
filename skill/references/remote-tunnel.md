@@ -117,6 +117,20 @@ while :; do
 done
 ```
 
+If the host reaps long-running background processes (observed in sandboxed
+agent environments: SIGTERM delivered to a persistent loop), prefer a
+**scheduler-based watchdog** over the raw loop: a script job that runs the
+bootstrap every few minutes and prints *nothing* unless it hard-fails
+(exit 2 — ssh refused / forward could not be established). Exit 1 (tunnels
+up, remote bridge dark) must stay silent — the bridge is on-demand, so a
+closed browser is a normal state. In Hermes, a cron job with `no_agent` and
+a wrapper script implements exactly this watchdog pattern: empty stdout
+sends nothing, so the job is silent while healthy and speaks up only on
+transport failure. A small state file gives you alert throttling (at most
+one alert per hour while the failure persists) and a one-line recovery
+notice on the transition back to healthy. The bootstrap is idempotent, so
+a 5-minute cadence costs nothing and only sets detection latency.
+
 ## Token
 
 The bridge generates `~/.chrome-mcp/bridge-token` on the browser machine.
@@ -143,3 +157,9 @@ or logs. Liveness checks never need it (`/ping` is unauthenticated).
 - Killing the bridge process is safe (Chrome respawns it within seconds);
   killing the extension or its host registration is not — verify the
   extension is actually loaded before chasing tunnels.
+- A background `while :; do … sleep; done` supervisor is **not durable**:
+  host process managers can SIGTERM it (observed: both a 2.4-day-old loop
+  and a freshly started one). The `ssh -f` children outlive the loop, so a
+  reaped supervisor degrades gracefully — but use a scheduler (system cron
+  or an agent-platform cron job) instead of a raw loop for anything that
+  must outlive sessions.
