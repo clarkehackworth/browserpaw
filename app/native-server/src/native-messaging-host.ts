@@ -451,46 +451,43 @@ export class NativeMessagingHost {
       return;
     }
     try {
-      if (this.associatedServer.isRunning) {
-        this.sendMessage({
-          type: NativeMessageType.SERVER_STARTED,
-          payload: { port, token: getBridgeToken() },
-        });
-        return;
-      }
-
       const envPinned = ENV_PINNED_AT_START;
       let boundPort = port;
-      try {
-        await this.associatedServer.start(port, this);
-      } catch (error: any) {
-        if (!isPortBusyError(error) || envPinned) {
-          throw error;
-        }
-        // The requested port is held by another BrowserPaw bridge (a
-        // different browser instance) and we are not operator-pinned:
-        // scan upward for the next free port.
-        const MAX_SCAN = 10; // 12306..12316 — mirrors the shim's discovery range
-        console.error(
-          `[NativeHost] Port ${port} is held by another bridge; scanning for a free port...`,
-        );
-        for (let candidate = port + 1; candidate <= port + MAX_SCAN; candidate++) {
-          try {
-            await this.associatedServer.start(candidate, this);
-            boundPort = candidate;
-            break;
-          } catch (scanError: any) {
-            if (!isPortBusyError(scanError)) {
-              throw scanError;
+      if (this.associatedServer.isRunning) {
+        // Already listening (boot-time start): report the port actually bound,
+        // not the one the extension asked for, and still publish the registry entry.
+        boundPort = Number(process.env.CHROME_MCP_PORT) || port;
+      } else {
+        try {
+          await this.associatedServer.start(port, this);
+        } catch (error: any) {
+          if (!isPortBusyError(error) || envPinned) {
+            throw error;
+          }
+          // Requested port held by another bridge and not operator-pinned:
+          // scan upward for the next free port.
+          const MAX_SCAN = 10; // 12306..12316 — mirrors the shim's discovery range
+          console.error(
+            `[NativeHost] Port ${port} is held by another bridge; scanning for a free port...`,
+          );
+          for (let candidate = port + 1; candidate <= port + MAX_SCAN; candidate++) {
+            try {
+              await this.associatedServer.start(candidate, this);
+              boundPort = candidate;
+              break;
+            } catch (scanError: any) {
+              if (!isPortBusyError(scanError)) {
+                throw scanError;
+              }
             }
           }
-        }
-        if (boundPort === port) {
-          this.sendError(
-            `Failed to start server: ports ${port}–${port + MAX_SCAN} are all in use. ` +
-              `Set CHROME_MCP_PORT to a free port for this instance.`,
-          );
-          return;
+          if (boundPort === port) {
+            this.sendError(
+              `Failed to start server: ports ${port}–${port + MAX_SCAN} are all in use. ` +
+                `Set CHROME_MCP_PORT to a free port for this instance.`,
+            );
+            return;
+          }
         }
       }
 
