@@ -5,6 +5,9 @@ import { TIMEOUTS, ERROR_MESSAGES } from '../../../common/constants';
 import { sessionTabAffinity } from '../../../utils/session-tab-affinity';
 import {
   assertTabInjectable,
+  errorPageInjectionErrorMessage,
+  ExpectedPageRestrictionError,
+  isErrorPageInjectionError,
   isRestrictedChromeUrl,
   pingActionForFiles,
   restrictedUrlErrorMessage,
@@ -17,6 +20,11 @@ const PING_TIMEOUT_MS = 300;
 const INJECTION_TIMEOUT_MS = 15_000;
 
 const injectedScriptsCache = new Map<number, Set<string>>();
+
+function isMissingContentScriptReceiver(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Could not establish connection|Receiving end does not exist/i.test(message);
+}
 
 if (typeof chrome !== 'undefined' && chrome.tabs) {
   chrome.tabs.onUpdated?.addListener((tabId, changeInfo) => {
@@ -95,7 +103,7 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
     // "ping content script failed" line (see interaction.ts click path).
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (isRestrictedChromeUrl(tab?.url)) {
-      throw new Error(restrictedUrlErrorMessage(tab?.url));
+      throw new ExpectedPageRestrictionError(restrictedUrlErrorMessage(tab?.url));
     }
 
     const frameKey =
@@ -151,9 +159,15 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
         console.warn(`Unexpected ping response in tab ${tabId}:`, response);
       }
     } catch (error) {
-      console.error(
-        `ping content script failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      // A missing receiver is the normal result before the first injection.
+      // Only surface genuinely unexpected transport failures in the error panel.
+      if (isErrorPageInjectionError(error)) {
+        throw new ExpectedPageRestrictionError(errorPageInjectionErrorMessage(tab?.url));
+      } else if (!isMissingContentScriptReceiver(error)) {
+        console.error(
+          `ping content script failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     try {
@@ -179,6 +193,9 @@ export abstract class BaseBrowserToolExecutor implements ToolExecutor {
       }
       set.add(cacheKey);
     } catch (injectionError) {
+      if (isErrorPageInjectionError(injectionError)) {
+        throw new ExpectedPageRestrictionError(errorPageInjectionErrorMessage(tab?.url));
+      }
       const errorMessage =
         injectionError instanceof Error ? injectionError.message : String(injectionError);
       console.error(

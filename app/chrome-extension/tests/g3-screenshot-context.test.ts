@@ -6,7 +6,14 @@ import * as inPageEngine from '../entrypoints/background/tools/browser/in-page-e
 import { inPageGetAssetImage } from '../entrypoints/background/tools/browser/dom-indexer';
 import * as imageUtils from '@/utils/image-utils';
 import { cdpSessionManager } from '@/utils/cdp-session-manager';
+import * as frameCoordinates from '@/utils/frame-coordinates';
 import { TOOL_MESSAGE_TYPES } from '@/common/message-types';
+
+vi.mock('../entrypoints/background/native-host', () => ({
+  ensureNativeConnected: vi.fn(async () => true),
+  sendFileOperationToNative: vi.fn(() => false),
+  cancelFileOperation: vi.fn(),
+}));
 
 describe('G3 Screenshot Context & Bounds Regression Suite', () => {
   const tabId = 404;
@@ -36,7 +43,7 @@ describe('G3 Screenshot Context & Bounds Regression Suite', () => {
         drawImage,
         fillRect: vi.fn(),
         fillStyle: '',
-        getImageData: vi.fn(() => ({ data: new Uint8Array(4) })),
+        getImageData: vi.fn(() => ({ data: new Uint8Array(48 * 48 * 4) })),
         // 2D surface used by overlayCoordinateGrid, so D-07 can assert drawn labels
         font: '',
         strokeStyle: '',
@@ -76,6 +83,11 @@ describe('G3 Screenshot Context & Bounds Regression Suite', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     screenshotContextManager.clear(tabId);
+    snapshotCacheManager.setSnapshot(tabId, {
+      url: 'https://example.com',
+      elementCount: 1,
+      assetRoutes: new Map([[1, { frameId: 0, localIndex: 0 }]]),
+    });
     urlSeqIdx = 0;
     lastCanvasWidth = 1000;
     lastCanvasHeight = 1000;
@@ -118,6 +130,20 @@ describe('G3 Screenshot Context & Bounds Regression Suite', () => {
     vi.spyOn(screenshotTool as any, 'injectContentScript').mockResolvedValue(undefined);
     vi.spyOn(screenshotTool as any, 'sendMessageToTab').mockResolvedValue({ success: true });
     vi.spyOn(screenshotTool as any, 'captureTabPngWithRetry').mockResolvedValue(VALID_PNG_1);
+    vi.spyOn(cdpSessionManager, 'sendDebuggerCommand').mockImplementation(
+      (id: number, method: string, params?: object, timeoutMs = 20000) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        return Promise.race([
+          cdpSessionManager.sendCommand(id, method, params),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error(`CDP_SEND_TIMEOUT: ${method} no ack within ${timeoutMs}ms`)),
+              timeoutMs,
+            );
+          }),
+        ]).finally(() => clearTimeout(timer));
+      },
+    );
   });
 
   afterEach(() => {
@@ -600,6 +626,50 @@ describe('G3 Screenshot Context & Bounds Regression Suite', () => {
       },
     );
 
+    it('retries a stalled background CDP capture after a bounded warmup', async () => {
+      vi.spyOn(screenshotTool as any, 'resolveAffinityTab').mockResolvedValue({
+        id: tabId,
+        windowId: 1,
+        active: false,
+        width: 1000,
+        height: 1000,
+      });
+      vi.spyOn(cdpSessionManager, 'withSession').mockImplementation(async (_id, _owner, fn) =>
+        fn(),
+      );
+      vi.spyOn(cdpSessionManager, 'sendCommand').mockImplementation(async (_id, method) => {
+        if (method === 'Page.getLayoutMetrics') {
+          return {
+            cssVisualViewport: { clientWidth: 1000, clientHeight: 1000, pageX: 0, pageY: 0 },
+          };
+        }
+        return { data: VALID_PNG_1.split(',')[1], mimeType: 'image/png' };
+      });
+      let captures = 0;
+      const capture = vi
+        .spyOn(cdpSessionManager, 'sendDebuggerCommand')
+        .mockImplementation(async (_id, method, _params, timeoutMs) => {
+          if (method !== 'Page.captureScreenshot') {
+            throw new Error(`Unexpected method: ${method}`);
+          }
+          captures++;
+          if (captures === 1) {
+            expect(timeoutMs).toBe(1500);
+            throw new Error('CDP_SEND_TIMEOUT: Page.captureScreenshot no ack within 1500ms');
+          }
+          return { data: VALID_PNG_1.split(',')[1], mimeType: 'image/png' };
+        });
+
+      const response = await screenshotTool.execute({ tabId, format: 'png' });
+      const metadata = JSON.parse((response.content[0] as any).text);
+
+      expect(response.isError).toBeFalsy();
+      expect(captures).toBe(2);
+      expect(capture.mock.calls[1][3]).toBe(5000);
+      expect(metadata.cdpCaptureWarmupRetry).toBe(true);
+      expect(metadata.cdpCaptureWarning).toBeUndefined();
+    });
+
     it.each([
       {
         label: 'region default',
@@ -620,14 +690,14 @@ describe('G3 Screenshot Context & Bounds Regression Suite', () => {
         args: { region: { x0: 100, y0: 50, x1: 1500, y1: 650 }, maxWidth: 300 },
         accepted: true,
         width: 300,
-        height: 129,
+        height: 128,
       },
       {
         label: 'rejected ROI fallback',
         args: { region: { x0: 100, y0: 50, x1: NaN, y1: 650 } },
         accepted: false,
-        width: 1280,
-        height: 720,
+        width: 1429,
+        height: 804,
       },
     ])('uses accepted results.roi for $label', async ({ args, accepted, width, height }) => {
       vi.spyOn(cdpSessionManager, 'withSession').mockImplementation(async (_id, _owner, fn) =>
@@ -838,18 +908,26 @@ describe('G3 Screenshot Context & Bounds Regression Suite', () => {
         label: 'ordinary default',
         highClarity: undefined,
         maxWidth: undefined,
-        expectedWidth: 1280,
+        expectedWidth: 1429,
+        expectedHeight: 804,
       },
       {
         label: 'high clarity default',
         highClarity: true,
         maxWidth: undefined,
         expectedWidth: 1600,
+        expectedHeight: 900,
       },
-      { label: 'high clarity explicit cap', highClarity: true, maxWidth: 300, expectedWidth: 300 },
+      {
+        label: 'high clarity explicit cap',
+        highClarity: true,
+        maxWidth: 300,
+        expectedWidth: 300,
+        expectedHeight: 168,
+      },
     ])(
       'preserves the width contract for $label on a 1600px viewport',
-      async ({ highClarity, maxWidth, expectedWidth }) => {
+      async ({ highClarity, maxWidth, expectedWidth, expectedHeight }) => {
         vi.spyOn(screenshotTool as any, 'sendToHelperWithRetry').mockImplementation(
           async (_id: number, msg: any) => {
             if (msg.action === TOOL_MESSAGE_TYPES.SCREENSHOT_PREPARE_PAGE_FOR_CAPTURE)
@@ -879,7 +957,7 @@ describe('G3 Screenshot Context & Bounds Regression Suite', () => {
         const ctx = screenshotContextManager.getContext(tabId);
         expect(ctx).toBeDefined();
         expect(ctx!.screenshotWidth).toBe(expectedWidth);
-        expect(ctx!.screenshotHeight).toBe(Math.round(900 * (expectedWidth / 1600)));
+        expect(ctx!.screenshotHeight).toBe(expectedHeight);
         expect(lastCanvasWidth).toBe(expectedWidth);
         expect(lastCanvasHeight).toBe(ctx!.screenshotHeight);
       },
@@ -915,6 +993,77 @@ describe('G3 Screenshot Context & Bounds Regression Suite', () => {
       expect(ctx).toBeDefined();
       expect(ctx!.screenshotWidth).toBe(300);
       expect(ctx!.screenshotHeight).toBe(Math.round(600 * (300 / 800))); // 225
+    });
+
+    it('saves the original physical-resolution PNG when the model preview is downscaled', async () => {
+      vi.spyOn(screenshotTool as any, 'sendToHelperWithRetry').mockImplementation(
+        async (_id: number, msg: any) => {
+          if (msg.action === TOOL_MESSAGE_TYPES.SCREENSHOT_PREPARE_PAGE_FOR_CAPTURE)
+            return { success: true };
+          if (msg.action === TOOL_MESSAGE_TYPES.SCREENSHOT_GET_PAGE_DETAILS) {
+            return {
+              totalWidth: 1600,
+              totalHeight: 900,
+              viewportWidth: 1600,
+              viewportHeight: 900,
+              devicePixelRatio: 1,
+              currentScrollX: 0,
+              currentScrollY: 0,
+            };
+          }
+          return { success: true };
+        },
+      );
+      vi.spyOn(cdpSessionManager, 'withSession').mockImplementation(async (_id, _owner, fn) =>
+        fn(),
+      );
+      vi.spyOn(cdpSessionManager, 'sendCommand').mockImplementation(async (_id, method) => {
+        if (method === 'Page.getLayoutMetrics') {
+          return {
+            cssVisualViewport: { clientWidth: 1600, clientHeight: 900, pageX: 0, pageY: 0 },
+          };
+        }
+        if (method === 'Page.captureScreenshot') {
+          return { data: VALID_PNG_1.split(',')[1], mimeType: 'image/png' };
+        }
+        return { result: { value: undefined } };
+      });
+
+      const nativeHostMod = await import('../entrypoints/background/native-host');
+      vi.spyOn(nativeHostMod, 'ensureNativeConnected').mockResolvedValue(true);
+      let sentPayload: any;
+      vi.spyOn(nativeHostMod, 'sendFileOperationToNative').mockImplementation(
+        (message: any, callback?: any) => {
+          if (message.type === 'file_operation' && message.payload.action === 'prepareFile') {
+            sentPayload = message.payload;
+            setTimeout(
+              () =>
+                callback?.({
+                  payload: {
+                    success: true,
+                    filePath: 'C:\\Temp\\browserpaw\\full-resolution.png',
+                  },
+                }),
+              0,
+            );
+            return true;
+          }
+          return false;
+        },
+      );
+
+      const result = await screenshotTool.execute({ tabId, background: true, savePng: true });
+
+      expect(result.isError).toBeFalsy();
+      const metadata = JSON.parse(result.content[0].text as string);
+      expect(metadata).toMatchObject({
+        imageWidth: 1429,
+        imageHeight: 804,
+        savedMimeType: 'image/png',
+        fileSaved: true,
+      });
+      expect(sentPayload.fileName).toMatch(/\.png$/);
+      expect(sentPayload.base64Data).toBe(VALID_PNG_1.split(',')[1]);
     });
   });
 
@@ -958,6 +1107,31 @@ describe('G3 Screenshot Context & Bounds Regression Suite', () => {
     });
   });
 
+  describe('D-06b: asset screenshots always return PNG/JPEG', () => {
+    it('converts WebP asset bytes to the requested JPEG format', async () => {
+      vi.spyOn(inPageEngine, 'executeInPage').mockResolvedValue([
+        {
+          frameId: 0,
+          result: {
+            success: true,
+            kind: 'img',
+            src: 'https://cdn.example.com/photo.webp',
+            dataUrl: VALID_WEBP,
+            rect: { x: 0, y: 0, width: 100, height: 100 },
+          },
+        },
+      ] as any);
+      const res = await screenshotTool.execute({ tabId, assetIndex: 1 });
+
+      expect(res.isError).toBeFalsy();
+      const payload = JSON.parse(res.content[0].text as string);
+      expect(payload.format).toBe('jpeg');
+      const image = res.content.find((item: any) => item.type === 'image') as any;
+      expect(image.mimeType).toBe('image/jpeg');
+      expect(JSON.stringify(res.content)).not.toContain('image/webp');
+    });
+  });
+
   describe('D-20: subframe asset crop fallback uses top-level coordinates', () => {
     it('offsets a subframe asset rect by its frame origin before cropping the top-level capture', async () => {
       lastCanvasWidth = 1000;
@@ -991,13 +1165,17 @@ describe('G3 Screenshot Context & Bounds Regression Suite', () => {
                       success: false,
                       reason: 'tainted canvas',
                       rect: { x: 100, y: 80, width: 200, height: 100 },
-                      frameOffsetX: 300,
-                      frameOffsetY: 200,
                       devicePixelRatio: 1,
                       kind: 'canvas',
                     },
             },
           ] as any,
+      );
+      vi.spyOn(frameCoordinates, 'projectFramePoint').mockImplementation(
+        async (_tabId, frameId, point) => {
+          expect(frameId).toBe(42);
+          return { x: point.x + 300, y: point.y + 200 };
+        },
       );
 
       const res = await screenshotTool.execute({

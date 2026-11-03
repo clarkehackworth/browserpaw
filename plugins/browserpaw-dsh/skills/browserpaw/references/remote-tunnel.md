@@ -1,7 +1,7 @@
 # Remote Bridge Topology (Cross-Machine Setup)
 
 Use when the MCP client (agent) runs on a different machine than Chrome + the
-BrowserPaw extension — e.g. Hermes in a sandbox/VM/container controlling a
+BrowserPaw extension — e.g. an agent in a sandbox/VM/container controlling a
 desktop browser. Single-machine installs never need this page.
 
 ## Control chain
@@ -123,7 +123,7 @@ agent environments: SIGTERM delivered to a persistent loop), prefer a
 bootstrap every few minutes and prints *nothing* unless it hard-fails
 (exit 2 — ssh refused / forward could not be established). Exit 1 (tunnels
 up, remote bridge dark) must stay silent — the bridge is on-demand, so a
-closed browser is a normal state. In Hermes, a cron job with `no_agent` and
+closed browser is a normal state. A scheduler job with `no_agent` and
 a wrapper script implements exactly this watchdog pattern: empty stdout
 sends nothing, so the job is silent while healthy and speaks up only on
 transport failure. A small state file gives you alert throttling (at most

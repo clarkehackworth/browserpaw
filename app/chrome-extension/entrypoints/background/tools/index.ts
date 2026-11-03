@@ -1,8 +1,9 @@
-import { createErrorResponse } from '@/common/tool-handler';
+import { createErrorResponse, type ToolCallContext } from '@/common/tool-handler';
 import { ERROR_MESSAGES } from '@/common/constants';
 import { formatErrorForAgent, normalizeIncomingToolName, TOOL_SCHEMAS } from 'chrome-mcp-shared';
 import * as browserTools from './browser';
 import { tabFaviconManager } from './browser/tab-favicon';
+import { logUnexpectedToolError } from '@/utils/restricted-url';
 
 const tools = { ...browserTools } as any;
 // Only schemas declared in TOOL_SCHEMAS are callable. Some modules export
@@ -31,7 +32,7 @@ export interface ToolCallParam {
 /**
  * Handle tool execution
  */
-export const handleCallTool = async (param: ToolCallParam) => {
+export const handleCallTool = async (param: ToolCallParam, context?: ToolCallContext) => {
   try {
     const session = await chrome.storage.session.get('agentControlEnabled');
     if (session?.agentControlEnabled === false) {
@@ -52,7 +53,8 @@ export const handleCallTool = async (param: ToolCallParam) => {
     return createErrorResponse(`Tool ${param.name} not found`);
   }
 
-  const schema = toolSchemasMap.get(normalized.canonicalBackendName) || toolSchemasMap.get(param.name);
+  const schema =
+    toolSchemasMap.get(normalized.canonicalBackendName) || toolSchemasMap.get(param.name);
   const schemaProperties = (schema?.inputSchema as any)?.properties || {};
 
   try {
@@ -85,7 +87,7 @@ export const handleCallTool = async (param: ToolCallParam) => {
       args.sessionContext = param.sessionId;
     }
 
-    const result = await tool.execute(args);
+    const result = await tool.execute(args, context);
     let targetTabId = typeof args.tabId === 'number' && args.tabId > 0 ? args.tabId : undefined;
     if (!targetTabId && result && typeof result === 'object') {
       if (typeof (result as any).tabId === 'number') {
@@ -107,7 +109,7 @@ export const handleCallTool = async (param: ToolCallParam) => {
     }
     return result;
   } catch (error) {
-    console.error(`Tool execution failed for ${param.name}:`, error);
+    logUnexpectedToolError(`Tool execution failed for ${param.name}:`, error);
     // Keep a bounded stack so an unexpected failure can be located without
     // reproducing it under a debugger.
     return createErrorResponse(

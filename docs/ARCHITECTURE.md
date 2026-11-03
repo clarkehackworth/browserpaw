@@ -1,6 +1,9 @@
 # BrowserPaw (mcp-chrome) Architecture & System Design 🏗️
 
 > **Version**: 4.0.0 (Architecture Baseline Specification Snapshot)
+
+This is an architecture baseline with historical ADRs, not a current release acceptance report. Read [PROJECT](../PROJECT.md) for maintained responsibilities and [development boundaries/current work](./development/DEVELOPMENT.md) before implementing changes. Validate symbol and behavior details against source; performance figures in historical sections are not current guarantees.
+
 > **Target Runtime**: Chrome Extension Manifest V3, Chrome DevTools Protocol (CDP 1.3), Model Context Protocol (MCP 2024-11-05), Fastify HTTP/SSE, Chrome Native Messaging.
 
 ---
@@ -200,9 +203,9 @@ Below is a systematic comparison between **BrowserPaw**, **browser-use**, and **
 - **Decision**:
   1. Return CDP `Page.captureScreenshot` directly as Base64 image payloads in the MCP response (`type: 'image'`).
   2. Maintain an in-memory `ScreenshotRingBuffer` with a fixed capacity of 1 per tab, automatically evicting stale frames.
-  3. Default compression to JPEG ≤ 1280px. Disk writes (`savePng: true`) are strictly opt-in for manual debugging.
+  3. Fit the model-facing preview into a 1568px long-edge / 1.15MP JPEG budget while preserving the aspect ratio. `savePng: true` writes the full physical-pixel PNG; screenshot output is PNG/JPEG only.
   4. For background tabs (`active: false`), strictly use CDP `Page.captureScreenshot` (`fromSurface: true`) instead of `chrome.tabs.captureVisibleTab`, preventing active-window screen leaks and `requestAnimationFrame` hangs.
-- **Consequences**: Zero disk writes, sub-100ms screenshot round-trips, zero visual leaks across background tabs, and zero memory leaks in the MV3 service worker.
+- **Consequences**: Zero disk writes by default, bounded vision payloads across arbitrary aspect ratios, and explicit full-resolution output when the user requests a saved image.
 
 ### ADR-003: Unified Locator Degradation Chain & Visual Fallback
 
@@ -298,7 +301,7 @@ Below is a systematic comparison between **BrowserPaw**, **browser-use**, and **
 - **Status**: Implemented & Verified
 - **Context**: Complex modern applications embed nested and cross-origin iframes. Previous index trees and grep searches were restricted to the top frame or collided index numbers, while coordinate dispatches in subframes failed or misfired when iframe offsets were missing.
 - **Decision**:
-  1. In `chrome_grep`, execute DOM pruning across all frames (`allFrames: true`), hierarchically remapping subframe element indices (`currentIndex = elements.length + 1`), and synchronizing subframe maps via `inPageReindexFrame`.
+  1. In `chrome_grep`, execute DOM pruning across all frames (`allFrames: true`) and preserve each document's assigned element references. The in-page engine reserves document namespaces before publishing references; merging frame results never renumbers them.
   2. Expand grep attribute searching to query `placeholder`, `aria-label`, and `value` properties in addition to inner text and tag name.
   3. In `chrome_batch_actions`, detect cross-origin subframes via `inPageGetFrameOrigin` and prevent unprojected coordinate dispatches when frame offsets are not available.
   4. In `chrome_computer`, directly align `left_click` coordinate actions to native CDP mouse events (`Input.dispatchMouseEvent`, `isTrusted: true`).
@@ -318,7 +321,7 @@ Below is a systematic comparison between **BrowserPaw**, **browser-use**, and **
 ### ADR-014: Dynamic Profile Layering & Session-Level Tool Activation across Transports
 
 - **Status**: Implemented & Verified
-- **Context**: Different AI agent models have vastly different token window budgets. Standard monolithic MCP server exposing all 50 tools consumes ~20.4k chars/4 on `tools/list`, which overwhelms smaller or faster reasoning models. At the same time, hardcoding static profiles (e.g. `core` with 14 tools or `crawl` with 12 tools) prevented agents from dynamically discovering and invoking advanced debugging or network inspection capabilities when encountering complex edge cases.
+- **Context**: Different AI agent models have vastly different token window budgets. A monolithic MCP server exposing every tool on `tools/list` can overwhelm smaller or faster reasoning models. At the same time, hardcoded static profiles prevented agents from dynamically discovering and invoking advanced debugging or network inspection capabilities when encountering complex edge cases.
 - **Decision**:
   1. Define 8 comprehensive tool categories in `TOOL_CATEGORIES` across `packages/shared`: `navigate`, `perceive`, `act`, `observe`, `manage`, `diagnose`, `network`, and `crawl`.
   2. Retain `chrome_tool_docs` as an omni-present introspection tool across all profiles.

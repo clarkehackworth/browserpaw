@@ -1,5 +1,3 @@
-> **Tool Availability Notice**: Standard BrowserPaw MCP exposes the full 50 toolset (under full profile; stdio defaults to core). The optional Hermes plugin exposes 16 curated wrapper tools (`browserpaw_*`). Other tools are not available in the Hermes plugin; use standard MCP.
-
 # Visual Fallback & Multimodal Coordination Reference (PCIE)
 
 This reference documents the secondary visual execution engine for canvas games, WebGL visualizations, unlabeled SVG icons, or anti-bot DOM-obfuscated layouts.
@@ -13,39 +11,41 @@ This reference documents the secondary visual execution engine for canvas games,
 - **DOM Obfuscation**: Elements deliberately detached or hidden from accessibility trees.
 - **Visual Verification**: Checking visual styling, alignment, or screenshot-based evidence.
 
-_Rule: Never use visual fallback when a numeric index from `browserpaw_read_dom` is available. DOM interaction is 10x faster and 100% deterministic._
+Prefer an observed DOM ref or strict locator when it identifies the intended target. Use screenshots when the rendered content carries information the DOM cannot express. Neither path is guaranteed to complete the business task; verify its result.
 
 ---
 
-## 2. DPR 1:1 Viewport Normalization
+## 2. Coordinate Spaces and Capture Identity
 
-BrowserPaw automatically resamples all screenshots using `OffscreenCanvas` to exact CSS viewport dimensions ($W_{img} \equiv W_{viewport}, H_{img} \equiv H_{viewport}$):
+Screenshot dimensions can differ from CSS viewport dimensions because of scaling, cropping or image preparation. Read the returned `imageWidth`, `imageHeight`, viewport and capture metadata; do not multiply coordinates by the OS display scale yourself.
 
-- Completely eliminates coordinate drift caused by Windows display scaling (125%, 150%, 200%) or Retina displays.
-- Every coordinate label `(x, y)` visible on the screenshot maps 1:1 with mathematical fidelity to CDP physical pointer events and `getBoundingClientRect()`.
+- Native `coordinateSpace: "viewport"` coordinates use CSS viewport pixels and need no capture ID.
+- `coordinateSpace: "screenshot"` uses image coordinates and requires the exact ordinary `captureId` returned with a fresh screenshot. An implicit latest screenshot is insufficient.
+- Ordinary capture coordinates are available only when the screenshot reports `coordinateValidation.supported: true`. Full-page, element/ROI, asset and SoM captures may report unsupported; use them for inspection and obtain a supported viewport capture before acting.
+- Jev's `expectedScreenshotId` identifies its separate vision frame. Do not combine it with an ordinary `captureId`.
 
 ---
 
-## 3. Visual Perception Tools (`browserpaw_screenshot`)
+## 3. Visual Perception Tools (`chrome_screenshot`)
 
 ### A. Calibrated Coordinate Grid & Perimeter Rulers
 
 ```json
 {
   "grid": true,
-  "format": "webp",
-  "quality": 80
+  "format": "jpeg",
+  "quality": 85
 }
 ```
 
-- Overlays semi-transparent coordinate reference grid with perimeter tape measure rulers (20/50/100px ticks) and interior reticle crosshairs (`+`) to eliminate visual estimation error.
+- Adds coordinate grid and ruler cues. They assist reading coordinates; the capture identity and returned validation metadata still govern whether coordinate actions can run.
 
 ### B. Set-of-Mark 2.0 (SoM)
 
 ```json
 {
   "som": true,
-  "format": "webp"
+  "format": "jpeg"
 }
 ```
 
@@ -61,7 +61,7 @@ BrowserPaw automatically resamples all screenshots using `OffscreenCanvas` to ex
 }
 ```
 
-- Emulates GoFullPage: stitches viewports sequentially, restores original scroll offset, hides fixed-position headers to prevent ghost duplication, and handles sticky elements cleanly.
+- Requests a full-page image. Inspect the returned dimensions, truncation and coordinate-validation status rather than treating it as a viewport capture.
 
 ### D. Lossless ROI Sub-Region Crops & High Clarity
 
@@ -72,16 +72,35 @@ BrowserPaw automatically resamples all screenshots using `OffscreenCanvas` to ex
 }
 ```
 
-- Captures unscaled sub-regions at native device fidelity for tiny captchas, small icons, or dense data tables without lossy downscaling.
+- Requests a region for closer inspection of icons, text or tables. Read the returned scaling and validation metadata; a crop is not automatically a supported coordinate source.
+
+The default model-facing image is fitted to a 1568px long edge and 1.15MP while preserving the viewport aspect ratio. Lower `maxDimension` or `maxPixels` to save tokens; raise them, use `highClarity`, or capture a `region` for fine text. Screenshots are emitted as JPEG or PNG, never WebP.
+
+For routine visual checks, start with the default JPEG budget. Use a smaller `maxDimension` for layout confirmation, and reserve `highClarity` or a tight `region` for OCR and fine details. If a background-tab capture is slow, let BrowserPaw's bounded retry finish; do not issue a burst of duplicate screenshots.
+
+### E. User-Facing or Saved Screenshots
+
+```json
+{
+  "fullPage": true,
+  "savePng": true
+}
+```
+
+- `savePng: true` writes a full-resolution, lossless PNG at the capture's physical-pixel size to the system temporary directory and returns `fullPath`.
+- Use it whenever the user asks to view or keep a screenshot. The inline preview may be JPEG for model token efficiency; the saved file remains the clear original.
+- The task page follows the real Chrome window size and DPR. Do not assume 1440x900 or DPR 1; read `imageWidth`, `imageHeight`, `viewportWidth`, `viewportHeight`, and the capture metadata before mapping coordinates.
 
 ---
 
-## 4. Multimodal Coordinate Actions (`browserpaw_computer`)
+## 4. Multimodal Coordinate Actions (`chrome_computer`)
 
 For visual clicks and typing, BrowserPaw supports Polymorphic Coordinate Input (PCIE):
 
-- **Object Format**: `{ "action": "left_click", "coordinates": { "x": 450, "y": 320 } }`
-- **Array Format**: `{ "action": "left_click", "coordinates": [450, 320] }`
+- **Viewport Object**: `{ "action": "left_click", "coordinateSpace": "viewport", "coordinates": { "x": 450, "y": 320 } }`
+- **Screenshot Object**: `{ "action": "left_click", "coordinateSpace": "screenshot", "captureId": "<observed captureId>", "coordinates": { "x": 450, "y": 320 } }`
+- **Array Coordinates**: `[450, 320]` uses the same explicitly selected coordinate space and identity rules.
 - **Supported Actions** (16): `left_click`, `right_click`, `double_click`, `triple_click`, `left_click_drag`, `scroll`, `scroll_to`, `type`, `key`, `hover`, `wait`, `fill`, `fill_form`, `zoom`, `screenshot`, `resize_page`.
-- **Pre-flight Occlusion Inspection**: Automatically runs `DOM.getNodeForLocation` / `DOM.getBoxModel` to prevent clicking obscured elements.
-- **Natural Kinematics**: Enforces humanized deceleration trajectories within a 65px radius, 80-120ms physiological settling pauses, and supports hold durations up to 3000ms.
+- **Validation**: Screenshot actions check the capture, document, viewport, DPR, scroll and observed DOM revision before dispatch. A navigation, relevant mutation, replaced capture or lost observer requires a fresh screenshot. Do not retry the original action to infer whether a dispatched write succeeded.
+- **Boundary**: Canvas redraws, video, pure CSS animation and cross-origin frame contents are not fully observable by this DOM-based check. Read `captureValidationBoundary`; use fresh visual evidence and a business postcondition for these cases.
+- **Outcome**: A trusted mouse event or accepted coordinate is delivery evidence. Verify the requested page/result state separately.

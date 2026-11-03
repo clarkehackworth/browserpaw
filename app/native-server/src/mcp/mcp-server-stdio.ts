@@ -8,6 +8,7 @@ import {
   ListToolsRequestSchema,
   ListResourcesRequestSchema,
   ListPromptsRequestSchema,
+  ToolListChangedNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
   filterToolSchemas,
@@ -22,6 +23,7 @@ import {
   getBaseToolName,
 } from 'chrome-mcp-shared';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { reserveStdoutForProtocol } from '../stdout-guard';
 import {
   StreamableHTTPClientTransport,
   StreamableHTTPError,
@@ -200,6 +202,10 @@ export const ensureMcpClient = async (): Promise<Client | null> => {
         { name: 'Mcp Chrome Proxy', version: '1.0.0' },
         { capabilities: {} },
       );
+      localClient.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+        if (currentClientGeneration !== thisGeneration || !stdioMcpServer) return;
+        await stdioMcpServer.sendToolListChanged();
+      });
       const transport = new StreamableHTTPClientTransport(targetUrl, {
         requestInit: { headers, redirect: 'error' },
       });
@@ -241,12 +247,12 @@ export const getStdioMcpServer = () => {
   }
   stdioMcpServer = new Server(
     {
-      name: 'StdioChromeMcpServer',
+      name: 'BrowserPaw Stdio',
       version: '1.0.0',
     },
     {
       capabilities: {
-        tools: {},
+        tools: { listChanged: true },
         resources: {},
         prompts: {},
       },
@@ -332,9 +338,11 @@ export const setupTools = (server: Server) => {
 
     const res = await handleToolCall(backendName, args);
     if (res && Array.isArray(res.content)) {
-      for (const item of res.content) {
-        if (item && item.type === 'text' && typeof item.text === 'string') {
-          item.text = alignToolReferences(item.text, requestedPrefix);
+      if (backendName === 'chrome_tool_docs') {
+        for (const item of res.content) {
+          if (item && item.type === 'text' && typeof item.text === 'string') {
+            item.text = alignToolReferences(item.text, requestedPrefix);
+          }
         }
       }
       if (autoActivatedCategory) {
@@ -591,6 +599,7 @@ export function startParentWatchdog(parentPid: number): void {
 }
 
 async function main() {
+  reserveStdoutForProtocol();
   // Listen for stdin EOF and close
   process.stdin.on('end', () => triggerCleanExit(0));
   process.stdin.on('close', () => triggerCleanExit(0));

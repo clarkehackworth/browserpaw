@@ -81,7 +81,7 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
       expect(verified.submitButtonState?.text).toBe('立即查询');
     });
 
-    it('detects buttons in non-form search wrappers and input-groups', () => {
+    it('does not infer a submitter from nearby buttons without a native form owner', () => {
       const searchBox = document.createElement('div');
       searchBox.className = 'search-box input-group';
 
@@ -104,9 +104,7 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
 
       const verified = inPageVerifyInputCommitment(30, 'query');
       expect(verified.committed).toBe(true);
-      expect(verified.submitButtonState?.found).toBe(true);
-      expect(verified.submitButtonState?.index).toBe(31);
-      expect(verified.submitButtonState?.text).toBe('Search');
+      expect(verified.submitButtonState).toBeUndefined();
     });
 
     it('detects external submit button associated via HTML5 form="formId" attribute', () => {
@@ -132,8 +130,8 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
     });
   });
 
-  describe('2. chrome_read_dom pipelineHint', () => {
-    it('provides pipelineHint in payload to advertise 1-turn execution', async () => {
+  describe('2. chrome_read_dom observation payload', () => {
+    it('preserves observed refs without repeating tool usage instructions', async () => {
       const mod = await import('../entrypoints/background/tools/browser/read-dom');
       const engine = await import('../entrypoints/background/tools/browser/in-page-engine');
       const spy = vi.spyOn(engine, 'executeInPage');
@@ -165,10 +163,9 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
 
       expect(res.isError).toBe(false);
       const parsed = JSON.parse(res.content[0].text as string);
-      expect(parsed.pipelineHint).toBeDefined();
-      expect(parsed.pipelineHint).toContain('1-Turn Optimal Paradigm');
-      expect(parsed.pipelineHint).toMatch(/(browserpaw|browserclaw|chrome)_batch_actions/);
-      expect(parsed.pipelineHint).toContain('pressEnter: true');
+      expect(parsed).not.toHaveProperty('pipelineHint');
+      expect(parsed.treeString).toContain('[15]');
+      expect(parsed.treeString).toContain('[18]');
     });
   });
 
@@ -207,8 +204,8 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
           return await fn();
         });
       const sendCommandSpy = vi.spyOn(cdpMod.cdpSessionManager, 'sendCommand').mockResolvedValue({
-        data: 'UklGRkAAAABXRUJQVlA4IDQAAADwAQCdASoBAAEAAkA4JaQAA3AA/vsGAAA=',
-        mimeType: 'image/webp',
+        data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        mimeType: 'image/png',
       });
 
       const res = await screenshotTool.execute({ name: 'phone_results' });
@@ -220,15 +217,46 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
       expect(payload.fileSaved).toBe(false);
       expect(payload.downloadId).toBeUndefined();
       expect(payload.fullPath).toBeUndefined();
+      expect(payload.format).toBe('jpeg');
 
       // Ensure chrome.downloads.download was NEVER called
       expect((chrome as any).downloads.download).not.toHaveBeenCalled();
 
       // Ensure MCP image content block is returned directly in-memory
-      expect(res.content.some((c: any) => c.type === 'image')).toBe(true);
+      const image = res.content.find((c: any) => c.type === 'image') as any;
+      expect(image).toBeDefined();
+      expect(image.mimeType).toBe('image/jpeg');
+      expect(JSON.stringify(res.content)).not.toContain('image/webp');
 
       withSessionSpy.mockRestore();
       sendCommandSpy.mockRestore();
+    });
+
+    it('maps a legacy WebP request to JPEG without returning WebP', async () => {
+      const { screenshotTool } = await import('../entrypoints/background/tools/browser/screenshot');
+      (screenshotTool as any).resolveAffinityTab = async () => ({
+        id: 1,
+        url: 'https://example.com',
+        title: 'Example',
+      });
+
+      const cdpMod = await import('@/utils/cdp-session-manager');
+      vi.spyOn(cdpMod.cdpSessionManager, 'withSession').mockImplementation(
+        async (_tabId: any, _owner: any, fn: any) => await fn(),
+      );
+      vi.spyOn(cdpMod.cdpSessionManager, 'sendCommand').mockResolvedValue({
+        data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        mimeType: 'image/png',
+      });
+
+      const res = await screenshotTool.execute({ name: 'legacy_webp', format: 'webp' as any });
+
+      expect(res.isError).toBe(false);
+      const payload = JSON.parse(res.content[0].text as string);
+      expect(payload.format).toBe('jpeg');
+      const image = res.content.find((c: any) => c.type === 'image') as any;
+      expect(image.mimeType).toBe('image/jpeg');
+      expect(JSON.stringify(res.content)).not.toContain('image/webp');
     });
 
     it('routes disk save to system temporary directory via native host when savePng is true', async () => {
@@ -246,21 +274,23 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
           return await fn();
         });
       const sendCommandSpy = vi.spyOn(cdpMod.cdpSessionManager, 'sendCommand').mockResolvedValue({
-        data: 'UklGRkAAAABXRUJQVlA4IDQAAADwAQCdASoBAAEAAkA4JaQAA3AA/vsGAAA=',
-        mimeType: 'image/webp',
+        data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        mimeType: 'image/png',
       });
 
       const nativeHostMod = await import('../entrypoints/background/native-host');
       const ensureSpy = vi.spyOn(nativeHostMod, 'ensureNativeConnected').mockResolvedValue(true);
       const sendSpy = vi.spyOn(nativeHostMod, 'sendFileOperationToNative');
+      let sentPayload: any;
       sendSpy.mockImplementation((msg: any, cb?: any) => {
         if (msg.type === 'file_operation' && msg.payload.action === 'prepareFile') {
+          sentPayload = msg.payload;
           setTimeout(() => {
             cb?.({
               payload: {
                 success: true,
                 filePath:
-                  'C:\\Users\\User\\AppData\\Local\\Temp\\chrome-mcp-uploads\\phone_results_test.webp',
+                  'C:\\Users\\User\\AppData\\Local\\Temp\\chrome-mcp-uploads\\phone_results_test.png',
               },
             });
           }, 5);
@@ -276,6 +306,10 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
       expect(payload.fileSaved).toBe(true);
       expect(payload.savedTo).toBe('system_temp');
       expect(payload.fullPath).toContain('chrome-mcp-uploads');
+      expect(sentPayload.fileName).toMatch(/\.png$/);
+      expect(sentPayload.base64Data).toBe(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      );
       // Verify downloads.download was NOT invoked because native host handled temp storage
       expect((chrome as any).downloads.download).not.toHaveBeenCalled();
 
@@ -319,7 +353,7 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
                 payload: {
                   success: true,
                   filePath:
-                    'C:\\Users\\User\\AppData\\Local\\Temp\\chrome-mcp-uploads\\phone_results_large.webp',
+                    'C:\\Users\\User\\AppData\\Local\\Temp\\chrome-mcp-uploads\\phone_results_large.png',
                 },
               });
             }, 5);
@@ -334,6 +368,7 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
       const payload = JSON.parse(res.content[0].text as string);
       expect(payload.fileSaved).toBe(true);
       expect(payload.savedTo).toBe('system_temp');
+      expect(capturedPayloadSize).toBe(800 * 1024);
       expect((chrome as any).downloads.download).not.toHaveBeenCalled();
 
       withSessionSpy.mockRestore();
@@ -368,8 +403,8 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
         },
       ] as any);
 
-      const interactMod = await import('../entrypoints/background/tools/browser/interact-index');
-      const interactSpy = vi.spyOn(interactMod.interactIndexTool, 'execute').mockResolvedValue({
+      const interactionMod = await import('../entrypoints/background/tools/browser/interaction');
+      const clickSpy = vi.spyOn(interactionMod.clickTool, 'execute').mockResolvedValue({
         content: [
           { type: 'text', text: JSON.stringify({ success: true, action: 'click', index: 18 }) },
         ],
@@ -380,6 +415,7 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
         index: 15,
         text: '13800138000',
         submit: true,
+        submitTarget: { index: 18 },
       });
 
       expect(res.isError).toBe(false);
@@ -387,11 +423,11 @@ describe('Zero-RTT Submission & Diskless Screenshot Hardening', () => {
       expect(parsed.submitted).toBe(true);
       expect(parsed.submitMethod).toBe('click');
       expect(parsed.submittedButtonIndex).toBe(18);
-      expect(interactSpy).toHaveBeenCalledWith(
+      expect(clickSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           index: 18,
-          action: 'click',
         }),
+        expect.any(Object),
       );
 
       vi.restoreAllMocks();

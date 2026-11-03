@@ -1,28 +1,22 @@
 import { type Tool } from '@modelcontextprotocol/sdk/types.js';
 
-export type ToolNamespacePrefix = 'browserpaw_' | 'browserclaw_' | 'chrome_';
+export type ToolNamespacePrefix = 'browserpaw_' | 'chrome_';
 
 // Default canonical prefix aligned with current environment prefix (browserpaw_)
 let activePrefix: ToolNamespacePrefix = 'browserpaw_';
 
 // Check environment variables if available (e.g. Node.js runtime)
 if (typeof process !== 'undefined' && process?.env) {
-  if (process.env.BROWSERPAW_TOOL_PREFIX) {
-    const envPfx = process.env.BROWSERPAW_TOOL_PREFIX.endsWith('_')
-      ? process.env.BROWSERPAW_TOOL_PREFIX
-      : `${process.env.BROWSERPAW_TOOL_PREFIX}_`;
-    activePrefix = envPfx as ToolNamespacePrefix;
-  } else if (process.env.BROWSERCLAW_TOOL_PREFIX) {
-    const envPfx = process.env.BROWSERCLAW_TOOL_PREFIX.endsWith('_')
-      ? process.env.BROWSERCLAW_TOOL_PREFIX
-      : `${process.env.BROWSERCLAW_TOOL_PREFIX}_`;
-    activePrefix = envPfx as ToolNamespacePrefix;
-  } else if (process.env.CHROME_MCP_TOOL_PREFIX) {
-    const envPfx = process.env.CHROME_MCP_TOOL_PREFIX.endsWith('_')
-      ? process.env.CHROME_MCP_TOOL_PREFIX
-      : `${process.env.CHROME_MCP_TOOL_PREFIX}_`;
-    activePrefix = envPfx as ToolNamespacePrefix;
+  const configuredPrefix = process.env.BROWSERPAW_TOOL_PREFIX || process.env.CHROME_MCP_TOOL_PREFIX;
+  if (configuredPrefix) setActiveToolPrefix(configuredPrefix);
+}
+
+function normalizeToolPrefix(prefix: string): ToolNamespacePrefix {
+  const normalized = prefix.endsWith('_') ? prefix : `${prefix}_`;
+  if (normalized !== 'browserpaw_' && normalized !== 'chrome_') {
+    throw new Error('Unsupported tool prefix; use browserpaw or chrome.');
   }
+  return normalized;
 }
 
 /**
@@ -36,20 +30,16 @@ export function getActiveToolPrefix(): ToolNamespacePrefix {
  * Dynamically set the active tool prefix.
  */
 export function setActiveToolPrefix(prefix: ToolNamespacePrefix | string): void {
-  const normalized = prefix.endsWith('_') ? prefix : `${prefix}_`;
-  activePrefix = normalized as ToolNamespacePrefix;
+  activePrefix = normalizeToolPrefix(prefix);
 }
 
 /**
- * Extract the base name from any tool name (e.g. 'chrome_read_dom' -> 'read_dom', 'browserpaw_read_dom' -> 'read_dom', 'browserclaw_read_dom' -> 'read_dom').
+ * Extract the base name from a supported tool name (e.g. 'chrome_read_dom' -> 'read_dom', 'browserpaw_read_dom' -> 'read_dom').
  */
 export function getBaseToolName(toolIdentifier: string): string {
   if (!toolIdentifier || typeof toolIdentifier !== 'string') return toolIdentifier;
   if (toolIdentifier.startsWith('browserpaw_')) {
     return toolIdentifier.slice('browserpaw_'.length);
-  }
-  if (toolIdentifier.startsWith('browserclaw_')) {
-    return toolIdentifier.slice('browserclaw_'.length);
   }
   if (toolIdentifier.startsWith('chrome_')) {
     return toolIdentifier.slice('chrome_'.length);
@@ -72,12 +62,7 @@ export const NON_CHROME_TOOLS: ReadonlySet<string> = new Set([
  *   resolveToolName('get_windows_and_tabs') => 'browserpaw_get_windows_and_tabs'
  */
 export function resolveToolName(toolIdentifier: string, prefixOverride?: string): string {
-  const prefix =
-    prefixOverride !== undefined
-      ? prefixOverride.endsWith('_')
-        ? prefixOverride
-        : `${prefixOverride}_`
-      : activePrefix;
+  const prefix = prefixOverride !== undefined ? normalizeToolPrefix(prefixOverride) : activePrefix;
 
   const baseName = getBaseToolName(toolIdentifier);
 
@@ -108,16 +93,6 @@ export function normalizeIncomingToolName(name: string): {
       prefix: 'browserpaw_',
     };
   }
-  if (name.startsWith('browserclaw_')) {
-    const raw = name.slice('browserclaw_'.length);
-    if (NON_CHROME_TOOLS.has(raw)) {
-      return { canonicalBackendName: raw, prefix: 'browserclaw_' };
-    }
-    return {
-      canonicalBackendName: 'chrome_' + raw,
-      prefix: 'browserclaw_',
-    };
-  }
   if (name.startsWith('chrome_')) {
     const raw = name.slice('chrome_'.length);
     if (NON_CHROME_TOOLS.has(raw)) {
@@ -131,19 +106,45 @@ export function normalizeIncomingToolName(name: string): {
   return { canonicalBackendName: 'chrome_' + name, prefix: '' };
 }
 
+const EXPLICIT_TARGET_SCHEMA = {
+  type: 'object',
+  properties: {
+    index: { type: 'number', description: 'Element index from the current observation' },
+    frameId: {
+      type: 'integer',
+      minimum: 0,
+      description: 'Resolve only in this frame; never fall back to another frame.',
+    },
+    ref: {
+      type: ['string', 'number'],
+      description: 'Element ref or numeric index from the current observation',
+    },
+    selector: { type: 'string', description: 'CSS selector or XPath for the target' },
+    text: { type: 'string', description: 'Visible text target' },
+    role: { type: 'string', description: 'ARIA role target' },
+    label: { type: 'string', description: 'Associated native or ARIA label target' },
+    exact: { type: 'boolean', description: 'Require an exact text or label match' },
+  },
+  additionalProperties: false,
+  anyOf: [
+    { required: ['index'] },
+    { required: ['ref'] },
+    { required: ['selector'] },
+    { required: ['text'] },
+    { required: ['role'] },
+    { required: ['label'] },
+  ],
+} as const;
+
 /**
  * Rewrites any tool references inside an agent-facing text/prompt/error to the target prefix.
  */
 export function alignToolReferences(text: string, targetPrefix: string = activePrefix): string {
   if (!text || typeof text !== 'string') return text;
-  const pfx = !targetPrefix
-    ? activePrefix
-    : targetPrefix.endsWith('_')
-      ? targetPrefix
-      : `${targetPrefix}_`;
+  const pfx = normalizeToolPrefix(targetPrefix || activePrefix);
 
   if (pfx === 'chrome_') {
-    return text.replace(/\b(browserpaw|browserclaw)_([a-zA-Z0-9_]+)\b/g, (_match, _ns, tool) => {
+    return text.replace(/\bbrowserpaw_([a-zA-Z0-9_]+)\b/g, (_match, tool) => {
       if (NON_CHROME_TOOLS.has(tool)) {
         return tool;
       }
@@ -155,15 +156,12 @@ export function alignToolReferences(text: string, targetPrefix: string = activeP
     .replace(/\bchrome_([a-zA-Z0-9_]+)\b/g, (_match, tool) => {
       return `${pfx}${tool}`;
     })
-    .replace(/\b(browserpaw|browserclaw)_([a-zA-Z0-9_]+)\b/g, (_match, _ns, tool) => {
+    .replace(/\bbrowserpaw_([a-zA-Z0-9_]+)\b/g, (_match, tool) => {
       return `${pfx}${tool}`;
     });
 
   for (const nonChromeTool of NON_CHROME_TOOLS) {
-    const regex = new RegExp(
-      `(?<!(?:browserpaw_|browserclaw_|chrome_))\\b${nonChromeTool}\\b`,
-      'g',
-    );
+    const regex = new RegExp(`(?<!(?:browserpaw_|chrome_))\\b${nonChromeTool}\\b`, 'g');
     result = result.replace(regex, `${pfx}${nonChromeTool}`);
   }
 
@@ -229,10 +227,112 @@ export const TOOL_NAMES = {
   },
   NATIVE: {
     ACT_TOWARD_GOAL: 'chrome_act_toward_goal',
+    TASK: 'chrome_task',
+    SKILL: 'chrome_skill',
   },
 };
 
 export const RAW_TOOL_SCHEMAS: Tool[] = [
+  {
+    name: TOOL_NAMES.NATIVE.TASK,
+    annotations: {
+      title: 'Manage Browser Task',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    description:
+      'Manage durable browser tasks and owned pages. Connections do not own tasks. Default budget: eight created pages; borrowed pages are never cleaned up. Cancellation stops later actions without rolling back dispatched work. finish keepUnknownPages:true requires confirm:true and retains unresolved page-creation receipts, including known tabs and receipts without a tabId, without closing them or claiming cleanup. Default finish stays unverified while those receipts still resolve to pages.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: [
+            'start',
+            'list',
+            'status',
+            'resume',
+            'takeOver',
+            'open',
+            'borrow',
+            'handOff',
+            'finish',
+            'cancel',
+          ],
+        },
+        taskId: { type: 'string' },
+        name: { type: 'string' },
+        goal: { type: 'string' },
+        url: { type: 'string' },
+        tabId: { type: 'integer', minimum: 1 },
+        keep: {
+          type: 'array',
+          items: { type: 'integer', minimum: 1 },
+          description: 'Owned tab IDs to hand back to the user when finishing.',
+        },
+        keepUnknownPages: {
+          type: 'boolean',
+          description:
+            'Finish while retaining every unresolved page-creation receipt, including known tabs and receipts without a tabId. Requires confirm: true. Does not close those pages or claim they were cleaned up. Omitted or false leaves finish unverified while such receipts still resolve to pages.',
+        },
+        adopt: {
+          type: 'boolean',
+          description:
+            "On resume, explicitly accept only the new document identity observed after this task's own navigation-producing action.",
+        },
+        confirm: {
+          type: 'boolean',
+          description:
+            'Required by takeOver to transfer a durable task from a disconnected or different MCP session. Also required with keepUnknownPages: true on finish.',
+        },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: TOOL_NAMES.NATIVE.SKILL,
+    annotations: {
+      title: 'Manage Browser Skills',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    description:
+      'Find and execute independently verified read-only site skills. Proposals remain candidates until at least two fresh-task tests with different inputs and output assertions pass. Automatic JavaScript steps require a locally reviewed program; new DOM extraction uses args.program="dom-extract" with data-only config. Arbitrary JavaScript and write-capable options are unsupported. Never replay unknown outcomes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['find', 'list', 'get', 'propose', 'validate', 'run', 'disable', 'rollback'],
+        },
+        id: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,63}$' },
+        url: { type: 'string' },
+        intent: { type: 'string' },
+        version: { type: 'integer', minimum: 1 },
+        definitionHash: {
+          type: 'string',
+          pattern: '^[a-f0-9]{64}$',
+          description:
+            'Expected active skill definition hash; execution stops if it changed after discovery.',
+        },
+        taskId: { type: 'string' },
+        inputs: { type: 'object', additionalProperties: true },
+        definition: {
+          type: 'object',
+          additionalProperties: true,
+          description:
+            'Executable recipe: id/name/description/domains/keywords/startUrl/inputSchema/outputSchema/steps[{tool,args,resultPath?}]/verification{tool,args,resultPath?}/tests[{inputs,expect,observe}]. Tool identifiers inside recipes always use the chrome_ backend prefix, regardless of displayed MCP tool names. DOM extraction uses the javascript backend with args={program:"dom-extract",config:{fields:[{name,selector,value:"text"|"attribute",attribute?,multiple?}]}}, resultPath="/result". It returns success, fields and sources.page. For multiple sources, verification and observe are matching arrays of 1–8 checks; every independent DOM/GET assertion must pass. URL parameters use {{key}}. Do not persist credentials, tab identities or refs.',
+        },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+  },
   {
     name: TOOL_NAMES.BROWSER.GET_WINDOWS_AND_TABS,
     annotations: {
@@ -347,6 +447,11 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
       type: 'object',
       properties: {
         tabId: { type: 'number', description: 'Target tab ID (default: active tab)' },
+        captureId: {
+          type: 'string',
+          description:
+            'Screenshot identity returned by chrome_screenshot. Required for screenshot-space coordinates; refuse dispatch if its document, DOM revision, viewport, DPR, scroll position, or capture identity changed.',
+        },
         groupTitle: {
           type: 'string',
           description:
@@ -423,7 +528,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           type: 'string',
           enum: ['viewport', 'screenshot'],
           description:
-            'Space of coordinates: viewport (default, absolute CSS pixels) or screenshot (mapped through the most recent screenshot context for this tab).',
+            'Space of coordinates: viewport (default, absolute CSS pixels) or screenshot (mapped through the capture named by captureId). Screenshot space requires captureId.',
         },
         autoSnap: {
           type: 'boolean',
@@ -528,14 +633,24 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           description:
             'For action=screenshot or action=zoom: preserve 100% full-resolution sharpness without downsampling.',
         },
+        maxDimension: {
+          type: 'number',
+          description:
+            'For action=screenshot: maximum long edge in pixels for the model-facing image. Default 1568.',
+        },
+        maxPixels: {
+          type: 'number',
+          description:
+            'For action=screenshot: maximum total pixels for the model-facing image. Default 1,150,000.',
+        },
         format: {
           type: 'string',
-          enum: ['png', 'jpeg', 'webp'],
+          enum: ['png', 'jpeg'],
           description: 'Image format for action=screenshot or action=zoom.',
         },
         quality: {
           type: 'number',
-          description: 'Image compression quality from 0 to 100.',
+          description: 'JPEG compression quality from 0 to 100 (default: 85).',
         },
         // For action=fill
         selector: {
@@ -615,6 +730,11 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           type: 'boolean',
           description: 'Create a new window to navigate to the URL or not. Defaults to false',
         },
+        newTab: {
+          type: 'boolean',
+          description:
+            'Create a new tab even when a matching page is already open. Defaults to false',
+        },
         tabId: {
           type: 'number',
           description:
@@ -679,7 +799,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
       openWorldHint: false,
     },
     description:
-      '[Prefer chrome_read_dom over taking a screenshot] Take a screenshot of the current page or a specific element. Returns base64 image directly in MCP image content block without writing to disk. By default, output is compressed JPEG with maxWidth <= 1280px. Debug disk save is available via savePng/saveToDisk into system temporary directory.',
+      '[Prefer chrome_read_dom over taking a screenshot] Capture the page, a region, or an element as PNG/JPEG. The default inline JPEG is fitted to a 1568px long edge and 1.15MP for a practical OCR/token balance. Tune sharpness with maxWidth, maxDimension, maxPixels, highClarity, or region. savePng writes the full-resolution physical-pixel PNG for user-facing delivery.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -711,7 +831,18 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         height: { type: 'number', description: 'Height in pixels (default: 600)' },
         maxWidth: {
           type: 'number',
-          description: 'Maximum width in pixels for compression (default: 1280)',
+          description:
+            'Optional hard cap on image width in pixels, applied together with the vision budget.',
+        },
+        maxDimension: {
+          type: 'number',
+          description:
+            'Maximum long edge in pixels for the model-facing image (default: 1568). Lower it to reduce tokens; raise it for fine text.',
+        },
+        maxPixels: {
+          type: 'number',
+          description:
+            'Maximum total pixels for the model-facing image (default: 1,150,000). Lower it to reduce tokens; raise it for dense pages.',
         },
         storeBase64: {
           type: 'boolean',
@@ -731,7 +862,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         savePng: {
           type: 'boolean',
           description:
-            'Save screenshot to system temporary directory for debugging (default: false, zero disk write by default)',
+            'Save a full-resolution, lossless PNG at the capture physical-pixel size to the system temporary directory. Use this for screenshots the user asked to view or keep.',
         },
         saveToDisk: {
           type: 'boolean',
@@ -765,7 +896,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         region: {
           type: 'object',
           description:
-            'Lossless high-density ROI crop: capture only a specific sub-region { x0, y0, x1, y1 } in CSS pixels or polymorphic [ymin, xmin, ymax, xmax]. Completely avoids downscaling and preserves full pixel clarity for fine details like small text or dice dots.',
+            'High-density ROI crop: capture only a specific sub-region { x0, y0, x1, y1 } in CSS pixels or polymorphic [ymin, xmin, ymax, xmax]. Use it to inspect fine text without paying for the full page.',
           properties: {
             x0: { type: 'number' },
             y0: { type: 'number' },
@@ -794,19 +925,18 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         },
         format: {
           type: 'string',
-          enum: ['png', 'jpeg', 'webp'],
+          enum: ['png', 'jpeg'],
           description:
-            'Image output format: webp (default, high compression for LLM), jpeg, or png',
+            'Output format: jpeg (default, compact for model inspection) or png (lossless). Saved screenshots are always PNG.',
         },
         quality: {
           type: 'number',
-          description:
-            'Image compression quality from 0 to 100 for webp/jpeg formats (default: 80)',
+          description: 'JPEG compression quality from 0 to 100 (default: 85)',
         },
         highClarity: {
           type: 'boolean',
           description:
-            'Prioritize 100% full-resolution clarity without downsampling (disables dimension scaling, keeps 1:1 CSS pixel sharpness for reading fine details or dice dots).',
+            'Disable the default vision budget and keep the native CSS-pixel image, unless maxDimension/maxPixels/maxWidth is explicitly set.',
         },
         sessionId: {
           type: 'string',
@@ -838,6 +968,20 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           items: { type: 'number' },
           description:
             'Array of tab IDs to close. If not provided, will close the active tab (requires confirm: true or session affinity).',
+        },
+        expectedTabs: {
+          type: 'array',
+          description:
+            'Fail-closed tab identities for task-owned cleanup. All tab IDs must match the current document and browser before any tab is closed.',
+          items: {
+            type: 'object',
+            properties: {
+              tabId: { type: 'number' },
+              documentId: { type: 'string' },
+              browserInstanceId: { type: 'string' },
+            },
+            required: ['tabId', 'documentId', 'browserInstanceId'],
+          },
         },
         url: {
           type: 'string',
@@ -1045,15 +1189,68 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
       idempotentHint: false,
       openWorldHint: false,
     },
-    description: 'Wait for a browser download and return details (id, filename, url, state, size)',
+    description:
+      'Wait for a download. With tabId/taskId, use an observed guid or clickTargetIndex to watch that page before clicking; source identity never falls back to browser-wide filename matching. CDP suggestedFilename is not a verified disk path. Without a page scope, the legacy filename filter observes browser-wide downloads.',
     inputSchema: {
       type: 'object',
       properties: {
-        filenameContains: { type: 'string', description: 'Filter by substring in filename or URL' },
-        timeoutMs: { type: 'number', description: 'Timeout in ms (default 60000, max 300000)' },
+        tabId: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Source page; taskId can supply its verified page.',
+        },
+        guid: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 128,
+          description:
+            'Observed download GUID from a receipt or task status; never repeats the initiating action.',
+        },
+        clickTargetIndex: {
+          type: 'integer',
+          minimum: 1,
+          description:
+            'Observed element ref to click once after source tracking is ready. Mutually exclusive with guid.',
+        },
+        frameId: {
+          type: 'integer',
+          minimum: 0,
+          description:
+            'Chrome numeric frame for clickTargetIndex; returned download.frameId is a CDP token and cannot be passed here.',
+        },
+        filenameContains: {
+          type: 'string',
+          description:
+            'Filter within this page by suggested filename or sanitized URL; query values are redacted. Without a page scope, matches browser-wide filename/URL.',
+        },
+        timeoutMs: {
+          type: 'integer',
+          minimum: 50,
+          maximum: 300000,
+          description: 'Timeout in ms (default 60000, max 300000)',
+        },
         waitForComplete: { type: 'boolean', description: 'Wait until completed (default true)' },
       },
       required: [],
+      oneOf: [
+        {
+          required: ['guid'],
+          anyOf: [{ required: ['tabId'] }, { required: ['taskId'] }],
+          not: { anyOf: [{ required: ['clickTargetIndex'] }, { required: ['frameId'] }] },
+        },
+        {
+          required: ['clickTargetIndex'],
+          anyOf: [{ required: ['tabId'] }, { required: ['taskId'] }],
+          not: { required: ['guid'] },
+        },
+        {
+          not: {
+            anyOf: ['tabId', 'taskId', 'guid', 'clickTargetIndex', 'frameId'].map((field) => ({
+              required: [field],
+            })),
+          },
+        },
+      ],
     },
   },
   {
@@ -1202,7 +1399,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
       openWorldHint: true,
     },
     description:
-      'Execute JavaScript code in a browser tab and return the result. Built-in "mcp" helper supports end-to-end in-page agent workflows: mcp.run(async () => ...), mcp.waitFor, mcp.click, mcp.fill, mcp.check, mcp.sleep, mcp.queryAll, and :has-text("...") pseudo-selector support, eliminating multi-turn LLM ping-pong latency. Uses CDP Runtime.evaluate with awaitPromise and returnByValue; automatically falls back to chrome.scripting.executeScript if the debugger is busy. Output is sanitized (sensitive data redacted) and truncated by default.',
+      'Execute JavaScript code in a browser tab and return the result. Built-in "mcp" helper supports end-to-end in-page agent workflows: mcp.run(async () => ...), mcp.waitFor, mcp.click, mcp.fill, mcp.check, mcp.sleep, mcp.queryAll, and :has-text("...") pseudo-selector support, eliminating multi-turn LLM ping-pong latency. Uses CDP Runtime.evaluate with awaitPromise and returnByValue; automatically falls back to chrome.scripting.executeScript if the debugger is busy. Set frameId to execute only in that frame. Output is sanitized (sensitive data redacted) and truncated by default.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1210,6 +1407,12 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           type: 'string',
           description:
             'JavaScript code to execute. Runs inside an async function body, so top-level await and "return ..." are supported.',
+        },
+        frameId: {
+          type: 'integer',
+          minimum: 0,
+          description:
+            'Target frame ID from observation (0 = main frame; default). Executes only in this frame.',
         },
         tabId: {
           type: 'number',
@@ -1269,6 +1472,11 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           type: 'string',
           description: 'Target element by ARIA role attribute (e.g. "button", "tab", "link").',
         },
+        label: { type: 'string', description: 'Target by associated native or ARIA label.' },
+        exact: {
+          type: 'boolean',
+          description: 'Require exact semantic locator matching; disables model assistance.',
+        },
         coordinate: {
           description:
             'Coordinates to click at: { x, y } object, [x, y] point, or [ymin, xmin, ymax, xmax] bounding box (preferred unified parameter). Interpreted in the space set by coordinateSpace (default: viewport).',
@@ -1315,7 +1523,13 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         coordinateSpace: {
           type: 'string',
           enum: ['viewport', 'screenshot'],
-          description: 'Space of coordinate/coordinates (default: viewport).',
+          description:
+            'Space of coordinate/coordinates (default: viewport). "screenshot" requires captureId and uses that exact capture.',
+        },
+        captureId: {
+          type: 'string',
+          description:
+            'Screenshot identity returned by chrome_screenshot. Required for screenshot-space coordinate fallback; ignored when a semantic locator succeeds without using coordinates.',
         },
         button: {
           type: 'string',
@@ -1401,10 +1615,15 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           type: 'string',
           description: 'Target element by ARIA role attribute (e.g. "textbox", "combobox").',
         },
+        label: { type: 'string', description: 'Target by associated native or ARIA label.' },
+        exact: {
+          type: 'boolean',
+          description: 'Require exact semantic locator matching; disables model assistance.',
+        },
         coordinate: {
           type: 'object',
           description:
-            'Viewport coordinates to click and focus before typing (fallback when ref/selector unavailable).',
+            'Coordinates to click and focus before typing (fallback when ref/selector unavailable). Interpreted in coordinateSpace.',
           properties: {
             x: { type: 'number', description: 'X coordinate in viewport/CSS pixels' },
             y: { type: 'number', description: 'Y coordinate in viewport/CSS pixels' },
@@ -1419,6 +1638,17 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
             y: { type: 'number' },
           },
           required: ['x', 'y'],
+        },
+        coordinateSpace: {
+          type: 'string',
+          enum: ['viewport', 'screenshot'],
+          description:
+            'Space of coordinate/coordinates (default: viewport). "screenshot" requires captureId and uses that exact capture.',
+        },
+        captureId: {
+          type: 'string',
+          description:
+            'Screenshot identity returned by chrome_screenshot. Required for screenshot-space coordinate fallback; ignored when a semantic locator succeeds without using coordinates.',
         },
         text: {
           type: 'string',
@@ -1478,6 +1708,22 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         selector: {
           type: 'string',
           description: 'CSS selector or XPath for target element to receive keyboard events.',
+        },
+        text: {
+          type: 'string',
+          description: 'Target element by visible text or accessible name.',
+        },
+        role: {
+          type: 'string',
+          description: 'Target element by a supported implicit or explicit ARIA role.',
+        },
+        label: {
+          type: 'string',
+          description: 'Target element by associated native or ARIA label.',
+        },
+        exact: {
+          type: 'boolean',
+          description: 'Require an exact text, accessible name, or label match.',
         },
         selectorType: {
           type: 'string',
@@ -1601,6 +1847,12 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
       type: 'object',
       properties: {
         tabId: { type: 'number', description: 'Target tab ID (default: active tab)' },
+        frameId: {
+          type: 'integer',
+          minimum: 0,
+          description:
+            'Explicit frame containing the target; selectors never fall back to another frame.',
+        },
         windowId: {
           type: 'number',
           description: 'Target window ID to pick active tab when tabId is omitted',
@@ -1660,6 +1912,11 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        dialogId: {
+          type: 'string',
+          description:
+            'Required when multiple source sessions have pending dialogs. Read IDs from action receipts.',
+        },
         action: {
           type: 'string',
           enum: ['accept', 'dismiss'],
@@ -1707,7 +1964,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         isolateModal: {
           type: 'boolean',
           description:
-            'When true and an active modal dialog is detected, restricts indexing to the active modal while strictly protecting portals, dropdowns, and alert containers.',
+            'When true and an active modal dialog is detected, restricts indexing to the active interaction surface. Standalone modal/portal roots are included through standard dialog/top-layer/popover semantics and explicit ARIA ownership relationships, not a fixed framework class list. Set false to observe background content while still reporting the active modal.',
         },
         exclude: {
           oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }],
@@ -1746,7 +2003,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         includeDetails: {
           type: 'boolean',
           description:
-            'Also return the bulky indexedElements/indexMap detail blocks (geometry, occlusion flags, safe click points). Off by default because the tree already carries index/tag/attributes/text; enable only when you need per-element rects or visibility flags.',
+            'Also return detailed element geometry and flags, or structured actions and validation metadata in fast mode. Off by default; the tree already carries actionable refs, labels, and values.',
         },
         viewportOnly: {
           type: 'boolean',
@@ -1762,12 +2019,12 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           type: 'string',
           enum: ['compact', 'html', 'fast'],
           description:
-            'Output format for treeString. "compact" (default) produces a concise, accessibility-tree-inspired representation without closing tags, slashing token usage by 60%+. "html" returns legacy pseudo-HTML tags. "fast" activates ultrafast atomic snapshot mode (10-30ms, <=15KB).',
+            'Output format for treeString. "compact" (default) uses a concise accessibility-inspired tree without closing tags. "html" returns pseudo-HTML tags. "fast" returns a budgeted snapshot; latency and total bytes depend on the page and frames.',
         },
         fast: {
           type: 'boolean',
           description:
-            'When true, activates the ultrafast atomic DOM snapshot engine (10-30ms, <=15KB payload) with WeakMap caching and native checkVisibility.',
+            'When true, uses the fast snapshot engine with stable document refs, native visibility checks, and a shared limit of 250 actions and 6000 body characters across reported frames. Truncation and unverified frame coverage are explicit. flattenCards and virtualizeViewport are rejected before observation because fast does not implement them; isolateModal true/false is supported.',
         },
         legacyVisibility: {
           type: 'boolean',
@@ -1777,7 +2034,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         deltaOnly: {
           type: 'boolean',
           description:
-            'When true, returns only changed/added/removed diffs compared to the previous snapshot, saving 90%+ tokens on repeated reads.',
+            'When true, returns changes compared to the previous compatible snapshot. A missing or incompatible baseline returns a full snapshot; fast mode uses the standard representation for delta requests.',
         },
         dismissOverlays: {
           type: 'boolean',
@@ -1792,7 +2049,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         flattenCards: {
           type: 'boolean',
           description:
-            'When true (default: true), identifies composite card containers (article, [role="article"], [role="listitem"], li) and aggregates fragmented leaf nodes into unified structured card summaries while preserving actionable link/click indices. Slashes token usage by 60%+ on eCommerce, search feeds, and news listings.',
+            'When true (default: true), identifies composite card containers (article, [role="article"], [role="listitem"], li) and aggregates fragmented leaf nodes into structured card summaries while preserving actionable link/click indices.',
         },
       },
       required: [],
@@ -1815,6 +2072,12 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         index: {
           type: 'number',
           description: 'Compact 1-based numeric index of the target element',
+        },
+        frameId: {
+          type: 'integer',
+          minimum: 0,
+          description:
+            'Resolve only in this frame, including explicit main frame 0; never cross-frame fallback.',
         },
         coordinate: {
           oneOf: [
@@ -1840,7 +2103,12 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           type: 'string',
           enum: ['viewport', 'screenshot'],
           description:
-            'Coordinate reference space. "viewport" (default) assumes standard CSS viewport pixels. "screenshot" scales coordinates based on the latest screenshot capture resolution.',
+            'Coordinate reference space. "viewport" (default) assumes standard CSS viewport pixels. "screenshot" scales coordinates through the capture named by captureId and requires that identity.',
+        },
+        captureId: {
+          type: 'string',
+          description:
+            'Screenshot identity returned by chrome_screenshot. Required when coordinateSpace is "screenshot"; dispatch fails if the document, DOM revision, viewport, DPR, scroll position, or capture identity is stale or superseded.',
         },
         autoSnap: {
           type: 'boolean',
@@ -1858,7 +2126,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
             required: ['x', 'y'],
           },
           description:
-            'Click sequence: dispatch a full CDP click at each viewport point with intervalMs pacing (rapid burst for moving canvas targets)',
+            'Click sequence: dispatch a full CDP click at each point with intervalMs pacing. When captureId is provided, the capture is revalidated before every point; the sequence stops after the first DOM/geometry drift instead of replaying.',
         },
         intervalMs: {
           type: 'number',
@@ -2002,13 +2270,19 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
       openWorldHint: true,
     },
     description:
-      'Fill text into an input or textarea element using its compact 1-based numeric index. For single search/form submission, pass pressEnter: true to fill and submit in 1 turn without needing a separate click. When filling multiple fields or clicking submit, use chrome_batch_actions to pipeline in 1 turn.',
+      'Fill text into an input, textarea, or editable element using its index or a strict locator. Filling verifies the field value only. A caller-requested Enter is an explicit separate action; `submit: true` requires `submitTarget` and uses the normal trusted click path.',
     inputSchema: {
       type: 'object',
       properties: {
         index: {
           type: 'number',
           description: 'Compact 1-based numeric index of the target element',
+        },
+        frameId: {
+          type: 'integer',
+          minimum: 0,
+          description:
+            'Resolve only in this frame, including explicit main frame 0; never cross-frame fallback.',
         },
         text: { type: 'string', description: 'Text content to fill into the element' },
         value: { type: 'string', description: 'Alias for text parameter' },
@@ -2019,13 +2293,14 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         pressEnter: {
           type: 'boolean',
           description:
-            'Whether to dispatch an Enter key event immediately after filling the text (default: false). Strongly recommended for search boxes and single-input queries to trigger immediate submission in 1 turn.',
+            'Dispatch one explicit Enter after the field value is verified (default: false). This is a key action, not proof that a form or external write succeeded. Do not combine with submit:true.',
         },
         submit: {
           type: 'boolean',
           description:
-            'Whether to automatically submit the form after filling (default: false). If true, clicks the detected submit button or presses Enter, completing fill + submit in 1 turn.',
+            'Click the caller-specified submitTarget after filling. Requires submitTarget; missing or ambiguous targets reject the request before dispatch. Do not combine with pressEnter:true.',
         },
+        submitTarget: EXPLICIT_TARGET_SCHEMA,
         tabId: { type: 'number', description: 'Target tab ID (optional)' },
         windowId: { type: 'number', description: 'Target window ID (optional)' },
         waitForSettle: {
@@ -2061,7 +2336,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
     },
     description:
       'Execute a sequential multi-step pipeline of browser actions in a single round-trip without waiting for intermediate model turns.\n' +
-      '* CRITICAL EFFICIENCY RULE: When the next 2+ actions are predictable (e.g. form filling: [fill username, fill password, click submit]; or search flow: [fill query, press Enter, wait]), ALWAYS use chrome_batch_actions instead of individual tool calls. It completes the entire sequence in 1 turn (3~5x faster, 75%+ lower token cost).\n' +
+      '* List each mutation explicitly. A fill step does not implicitly advance or submit a form; list the click or press_key step when the task authorizes it.\n' +
       '* Supported action types: click, double_click, right_click, fill, hover, scroll, press_key, wait, fill_form, assert, extract.\n' +
       '* Set includeDelta: true to automatically inspect DOM changes after the pipeline completes.',
     inputSchema: {
@@ -2091,6 +2366,11 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
                 description: 'Action type to perform',
               },
               index: { type: 'number', description: 'Element index (for click, fill, hover)' },
+              frameId: {
+                type: 'integer',
+                minimum: 0,
+                description: 'Resolve only in this frame; never fall back to a different frame.',
+              },
               ref: {
                 type: ['string', 'number'],
                 description: 'Target element numeric index or ref from chrome_read_dom',
@@ -2098,6 +2378,22 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
               selector: {
                 type: 'string',
                 description: 'CSS selector or XPath for target element',
+              },
+              targetText: {
+                type: 'string',
+                description: 'Target element by visible text when text is a fill value.',
+              },
+              role: {
+                type: 'string',
+                description: 'Strict target by supported implicit or explicit ARIA role.',
+              },
+              label: {
+                type: 'string',
+                description: 'Strict target by associated native or ARIA label.',
+              },
+              exact: {
+                type: 'boolean',
+                description: 'Require an exact text, accessible name, or label match.',
               },
               clear: {
                 type: 'boolean',
@@ -2111,8 +2407,9 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
               submit: {
                 type: 'boolean',
                 description:
-                  'Whether to automatically submit the form after filling (clicks detected submit button or presses Enter) (for type: fill)',
+                  'Click the explicit submitTarget after filling (for type: fill). Requires submitTarget and cannot be combined with pressEnter.',
               },
+              submitTarget: EXPLICIT_TARGET_SCHEMA,
               fields: {
                 type: 'array',
                 items: {
@@ -2636,7 +2933,13 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         coordinateSpace: {
           type: 'string',
           enum: ['viewport', 'screenshot'],
-          description: 'Coordinate space for coordinates (default: "viewport")',
+          description:
+            'Coordinate space for coordinates (default: "viewport"). Screenshot space requires captureId and is validated before every action.',
+        },
+        captureId: {
+          type: 'string',
+          description:
+            'Screenshot identity returned by chrome_screenshot. Required for screenshot-space burst actions; each action revalidates the capture before dispatch.',
         },
         burstClicks: {
           type: 'object',
@@ -2902,6 +3205,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
             'act',
             'observe',
             'manage',
+            'workflow',
             'crawl',
             'diagnose',
             'network',
@@ -3128,7 +3432,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
       openWorldHint: true,
     },
     description:
-      'Autonomously fill and advance multi-step forms / wizards (e.g. Typeform, onboarding, multi-page surveys) in a local execution loop without multi-turn LLM ping-pong. Automatically matches fields, selects choices, triggers step advancement (via Enter or OK/Next button), and yields structured interrupts upon CAPTCHA or blocking validation errors.',
+      'Fill the fields exposed by the current form step. Each field is an explicit action: text fills a matching control, choice clicks the named option, and enter dispatches the Enter key. The tool no longer guesses a next button or implicitly advances. Use chrome_batch_actions for explicit click or key steps, and verify business submission separately.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3150,7 +3454,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
                 type: 'string',
                 enum: ['text', 'choice', 'enter'],
                 description:
-                  'Input method: "text" (default fill), "choice" (click matching button/option), "enter" (submit via Enter key)',
+                  'Explicit action: "text" fills a matching control, "choice" clicks the named option, and "enter" dispatches Enter without claiming business submission',
               },
             },
             required: ['query', 'value'],
@@ -3158,13 +3462,21 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
           description: 'Ordered list of fields and values to fulfill throughout the form flow',
         },
         maxSteps: {
-          type: 'number',
+          type: 'integer',
+          minimum: 1,
+          maximum: 60,
           description: 'Maximum form advancement steps to attempt before returning (default: 20)',
+        },
+        timeoutMs: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 300000,
+          description: 'Total pipeline deadline, including nested operations (default: 60000ms).',
         },
         autoAdvance: {
           type: 'boolean',
           description:
-            'Automatically trigger step advance via Enter or clicking OK/Next button after input (default: true)',
+            'Deprecated compatibility flag. Implicit keyword clicks and Enter fallback are removed; true returns a migration-required refusal.',
         },
         tabId: { type: 'number', description: 'Target tab ID (optional)' },
         windowId: { type: 'number', description: 'Target window ID (optional)' },
@@ -3190,7 +3502,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
       openWorldHint: true,
     },
     description:
-      'Autonomous semantic micro-loop that perceives, decides, and acts toward a natural-language goal within a local Native Server loop (~200-400ms/step). Powered by TypeSafe Jev System One (Cloud or local resident CUDA GPU/MPS). Requires configured model; fails closed when unavailable. Automatically escalates ambiguous, destructive, or complex actions back to the macro planner with pre-fetched page context.',
+      'Run a bounded semantic micro-loop toward a natural-language page goal. The loop perceives the current page, chooses an action, verifies the result, and escalates ambiguous, destructive, or low-confidence decisions back to the calling agent.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3204,8 +3516,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         },
         maxSteps: {
           type: 'number',
-          description:
-            'Maximum decision steps before terminating (default: 10, max: 60; heuristic capped at <= 5)',
+          description: 'Maximum decision steps before terminating (default: 10, max: 60)',
         },
         timeoutMs: {
           type: 'number',
@@ -3217,7 +3528,7 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         },
         confidenceThreshold: {
           type: 'number',
-          description: 'Minimum confidence threshold to commit an action (default: 0.55)',
+          description: 'Minimum confidence threshold to commit an action (minimum/default: 0.85)',
         },
         pauseBeforeKeywords: {
           type: 'array',
@@ -3236,13 +3547,34 @@ export const RAW_TOOL_SCHEMAS: Tool[] = [
         pressEnter: {
           type: 'boolean',
           description:
-            'Whether to press Enter after filling text into an input field. When omitted, Jev judges from the task whether to fill only, fill and submit, or is unclear; an unclear answer pauses for the caller rather than submitting. An explicit value always wins.',
+            'Explicitly authorizes one Enter key step when the selected action is a fill. It does not prove business submission; generic forms and external writes still require caller authorization.',
         },
         mode: {
           type: 'string',
           enum: ['off', 'local', 'remote'],
           description:
-            'Optional override for the Jev semantic execution engine mode ("off", "local", or "remote"). Defaults to the mode configured in the extension popup.',
+            'Requested Jev mode. Must match the globally enabled backend; cannot override off or switch backends.',
+        },
+        verification: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 8,
+          description:
+            'Read-only independent observations required to declare the goal complete. Without these, completion remains unverified.',
+          items: {
+            type: 'object',
+            properties: {
+              tool: { type: 'string', enum: ['chrome_read_dom', 'chrome_network_request'] },
+              args: { type: 'object' },
+              resultPath: { type: 'string' },
+              expect: {
+                type: 'object',
+                description: 'Concrete JSON Schema assertion over the observed result.',
+              },
+            },
+            required: ['tool', 'args', 'expect'],
+            additionalProperties: false,
+          },
         },
       },
       required: ['goal'],
@@ -3460,4 +3792,19 @@ export const PURGED_TOOL_NAMES = new Set([
 
 export const TOOL_SCHEMAS: Tool[] = RAW_TOOL_SCHEMAS.filter(
   (tool) => !PURGED_TOOL_NAMES.has(tool.name),
-).map((tool) => alignSchemaDescriptions(tool));
+).map((tool) =>
+  alignSchemaDescriptions({
+    ...tool,
+    inputSchema: {
+      ...tool.inputSchema,
+      properties: {
+        ...tool.inputSchema.properties,
+        taskId: {
+          type: 'string',
+          description:
+            'Optional durable task identity; restricts this operation to its verified pages.',
+        },
+      },
+    },
+  }),
+);

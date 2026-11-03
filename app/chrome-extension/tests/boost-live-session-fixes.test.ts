@@ -223,7 +223,9 @@ describe('Live Taobao Session Fixes: Tab Grouping, Search Bar Autocomplete & Ove
       });
 
       expect(res.isError).toBe(true);
-      expect((res.content[0] as any).text).toContain('already at the beginning of browsing history');
+      expect((res.content[0] as any).text).toContain(
+        'already at the beginning of browsing history',
+      );
     });
 
     it('automatically groups tab and sets agent favicon when opening in new window with newWindow: true and autoGroup: true', async () => {
@@ -250,7 +252,9 @@ describe('Live Taobao Session Fixes: Tab Grouping, Search Bar Autocomplete & Ove
         },
       };
 
-      const ensureGroupSpy = vi.spyOn(tabGroupManager, 'ensureAgentTabGroup').mockResolvedValue(888);
+      const ensureGroupSpy = vi
+        .spyOn(tabGroupManager, 'ensureAgentTabGroup')
+        .mockResolvedValue(888);
 
       const res = await navigateTool.execute({
         url: 'https://www.taobao.com',
@@ -273,7 +277,7 @@ describe('Live Taobao Session Fixes: Tab Grouping, Search Bar Autocomplete & Ove
   // Problem B: Search Bar Autocomplete & Submit Button Integration
   // =========================================================================
   describe('Problem B: Search Bar Autocomplete & Submit Button Integration', () => {
-    it('detects Taobao-style search button with btn-search and tb-bg classes', () => {
+    it('does not infer a Taobao-style search submitter without a form owner', () => {
       const searchBox = document.createElement('div');
       searchBox.className = 'search-box';
 
@@ -298,12 +302,10 @@ describe('Live Taobao Session Fixes: Tab Grouping, Search Bar Autocomplete & Ove
 
       const res = inPageVerifyInputCommitment(1, '机械键盘');
       expect(res.committed).toBe(true);
-      expect(res.submitButtonState?.found).toBe(true);
-      expect(res.submitButtonState?.index).toBe(2);
-      expect(res.submitButtonState?.text).toBe('搜索');
+      expect(res.submitButtonState).toBeUndefined();
     });
 
-    it('detects search button located 3 ancestor levels up with SVG icon', () => {
+    it('does not infer a submitter from an unrelated ancestor or SVG icon', () => {
       const rootForm = document.createElement('div');
       rootForm.className = 'search-panel';
 
@@ -330,11 +332,10 @@ describe('Live Taobao Session Fixes: Tab Grouping, Search Bar Autocomplete & Ove
 
       const res = inPageVerifyInputCommitment(5, 'RTX 5090');
       expect(res.committed).toBe(true);
-      expect(res.submitButtonState?.found).toBe(true);
-      expect(res.submitButtonState?.index).toBe(8);
+      expect(res.submitButtonState).toBeUndefined();
     });
 
-    it('automatically clicks detected submit button in 1 turn when pressEnter is consumed without URL change', async () => {
+    it('does not assume an unchanged URL requires another submit click', async () => {
       const mockTab = {
         id: 201,
         url: 'https://www.taobao.com',
@@ -388,21 +389,12 @@ describe('Live Taobao Session Fixes: Tab Grouping, Search Bar Autocomplete & Ove
       expect(fillRes.isError).toBe(false);
       const parsed = JSON.parse((fillRes.content[0] as any).text);
 
-      // Verify that autocomplete fallback click was triggered automatically
-      expect(clickSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          index: 15,
-          action: 'click',
-          tabId: 201,
-        }),
-      );
-      expect(parsed.submitted).toBe(true);
-      expect(parsed.submitMethod).toBe('click');
-      expect(parsed.submittedButtonIndex).toBe(15);
-      expect(parsed.autoSubmitFallbackApplied).toBe(true);
+      expect(clickSpy).not.toHaveBeenCalled();
+      expect(parsed.submitted).toBeUndefined();
+      expect(parsed.autoSubmitFallbackApplied).toBeUndefined();
     });
 
-    it('records submitted: true and submitMethod: pressEnter when Enter results in URL change', async () => {
+    it('records the explicit Enter dispatch without claiming business submission', async () => {
       const initialTab = { id: 202, url: 'https://www.google.com' };
       const navTab = { id: 202, url: 'https://www.google.com/search?q=test' };
 
@@ -424,6 +416,17 @@ describe('Live Taobao Session Fixes: Tab Grouping, Search Bar Autocomplete & Ove
         if (fnName === 'inPageGetElementCoordinates') {
           return [{ result: { success: true, x: 50, y: 50, isSearch: true } }] as any;
         }
+        if (fnName === 'inPageFillIndex') {
+          return [
+            {
+              result: {
+                success: true,
+                committed: true,
+                pressEnterDispatched: true,
+              },
+            },
+          ] as any;
+        }
         if (fnName === 'inPageVerifyInputCommitment') {
           return [{ result: { committed: true } }] as any;
         }
@@ -440,8 +443,10 @@ describe('Live Taobao Session Fixes: Tab Grouping, Search Bar Autocomplete & Ove
 
       expect(fillRes.isError).toBe(false);
       const parsed = JSON.parse((fillRes.content[0] as any).text);
-      expect(parsed.submitted).toBe(true);
-      expect(parsed.submitMethod).toBe('pressEnter');
+      expect(parsed.pressEnterDispatched).toBe(true);
+      expect(parsed.interaction?.execution?.status).toBe('dispatched');
+      expect(parsed.interaction?.verification?.status).toBe('verified');
+      expect(parsed.submitted).not.toBe(true);
       expect(parsed.urlChanged).toBe(true);
     });
   });
@@ -600,24 +605,26 @@ describe('Live Taobao Session Fixes: Tab Grouping, Search Bar Autocomplete & Ove
         },
       };
 
-      const inPageSpy = vi.spyOn(inPageEngine, 'executeInPage').mockImplementation(async (_target, fnName) => {
-        if (fnName === 'inPageDismissOverlays') {
-          return [{ result: { dismissedCount: 1, overlays: [] } }] as any;
-        }
-        if (fnName === 'inPageDOMPruner') {
-          return [
-            {
-              frameId: 0,
-              result: {
-                treeString: '[1] button "Search"',
-                indexedElements: [],
-                scrollInfo: { pages_up: 0, pages_down: 0 },
+      const inPageSpy = vi
+        .spyOn(inPageEngine, 'executeInPage')
+        .mockImplementation(async (_target, fnName) => {
+          if (fnName === 'inPageDismissOverlays') {
+            return [{ result: { dismissedCount: 1, overlays: [] } }] as any;
+          }
+          if (fnName === 'inPageDOMPruner') {
+            return [
+              {
+                frameId: 0,
+                result: {
+                  treeString: '[1] button "Search"',
+                  indexedElements: [],
+                  scrollInfo: { pages_up: 0, pages_down: 0 },
+                },
               },
-            },
-          ] as any;
-        }
-        return [{ result: {} }] as any;
-      });
+            ] as any;
+          }
+          return [{ result: {} }] as any;
+        });
 
       const res = await readDOMTool.execute({
         tabId: 302,
@@ -779,9 +786,9 @@ describe('Live Taobao Session Fixes: Tab Grouping, Search Bar Autocomplete & Ove
         },
       };
 
-      const inPageSpy = vi.spyOn(inPageEngine, 'executeInPage').mockResolvedValue([
-        { result: { dismissedCount: 1, overlays: [] } },
-      ] as any);
+      const inPageSpy = vi
+        .spyOn(inPageEngine, 'executeInPage')
+        .mockResolvedValue([{ result: { dismissedCount: 1, overlays: [] } }] as any);
 
       const res = await navigateTool.execute({
         url: 'https://www.taobao.com',
