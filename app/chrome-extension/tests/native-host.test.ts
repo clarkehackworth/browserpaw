@@ -30,6 +30,7 @@ async function loadListener(port: any, connect: boolean): Promise<MessageListene
   runtime.connectNative = vi.fn().mockReturnValue(port);
   if (connect) {
     nativeHost.connectNativeHost(12345);
+    await vi.advanceTimersByTimeAsync(0); // START is sent after an async identity lookup
     port.postMessage.mockClear(); // Drop the START handshake sent on connect
   }
   (chrome.runtime.onMessage.addListener as any).mockClear();
