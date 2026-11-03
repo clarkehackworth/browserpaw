@@ -912,6 +912,12 @@ export class Server {
   // Server Lifecycle
   // ============================================================
 
+  /** The port the listening socket actually holds, or null when not listening. */
+  public get boundPort(): number | null {
+    const addr = this.fastify.server?.address();
+    return addr && typeof addr === 'object' ? addr.port : null;
+  }
+
   public async start(port = NATIVE_SERVER_PORT, nativeHost: NativeMessagingHost): Promise<void> {
     if (!this.nativeHost) {
       this.nativeHost = nativeHost;
@@ -922,7 +928,13 @@ export class Server {
     if (this.isRunning) {
       return;
     }
-    if (this.startPromise) return this.startPromise;
+    if (this.startPromise) {
+      // A bind (e.g. the boot-time default port) is already in flight. Wait for
+      // it instead of adopting its outcome as if it were for `port`: if it bound,
+      // we're running (callers read boundPort); if it failed, try `port` ourselves.
+      await this.startPromise.catch(() => {});
+      if (this.isRunning) return;
+    }
 
     this.startPromise = (async () => {
       try {

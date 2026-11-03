@@ -453,11 +453,7 @@ export class NativeMessagingHost {
     try {
       const envPinned = ENV_PINNED_AT_START;
       let boundPort = port;
-      if (this.associatedServer.isRunning) {
-        // Already listening (boot-time start): report the port actually bound,
-        // not the one the extension asked for, and still publish the registry entry.
-        boundPort = Number(process.env.CHROME_MCP_PORT) || port;
-      } else {
+      if (!this.associatedServer.isRunning) {
         try {
           await this.associatedServer.start(port, this);
         } catch (error: any) {
@@ -490,6 +486,10 @@ export class NativeMessagingHost {
           }
         }
       }
+
+      // Report the port the socket actually holds: the server may already have
+      // been listening (boot-time bind) on a port other than the one requested.
+      boundPort = this.associatedServer.boundPort ?? boundPort;
 
       // Publish registry entry for local auto-discovery (best-effort; the
       // entry contains the bridge token, file mode is 0600).

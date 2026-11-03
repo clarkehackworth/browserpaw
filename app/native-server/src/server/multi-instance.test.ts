@@ -85,6 +85,33 @@ describe('multi-instance port negotiation', () => {
     } catch {}
   });
 
+  test('START racing the boot-time bind reports the port actually bound', async () => {
+    // Bridge boots on a free port; the extension's START asks for a different
+    // (remembered) port while that boot bind is still in flight.
+    const bootPort = base + 20;
+    const serverD = new Server();
+    const hostD = new NativeMessagingHost();
+    hostD.setServer(serverD);
+    hostD.extensionInstanceName = 'boot-race';
+    const messages: any[] = [];
+    jest.spyOn(hostD, 'sendMessage').mockImplementation((m: any) => {
+      messages.push(m);
+    });
+
+    const boot = serverD.start(bootPort, hostD); // not awaited: still pending
+    await (hostD as any).startServer(bootPort + 1);
+    await boot;
+
+    const started = messages.find((m) => m.type === NativeMessageType.SERVER_STARTED);
+    expect(started.payload.port).toBe(bootPort);
+    const entry = (await readBridgeRegistryEntries()).find((e) => e.instanceName === 'boot-race');
+    expect(entry!.port).toBe(bootPort);
+
+    try {
+      await serverD.stop();
+    } catch {}
+  });
+
   test('env-pinned port fails loudly instead of scanning', async () => {
     // Re-require the host module in a fresh registry with CHROME_MCP_PORT
     // set, so the pin is captured at "process start" (module load) time.
