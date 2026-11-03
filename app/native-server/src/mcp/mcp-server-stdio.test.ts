@@ -2,6 +2,17 @@ import { describe, expect, it, jest, beforeAll, afterAll } from '@jest/globals';
 import os from 'os';
 import path from 'path';
 import * as tokenModule from '../server/token';
+
+// Isolate bridge-registry discovery from the real ~/.chrome-mcp/bridges: on a
+// machine with live bridges, real entries would otherwise steer these tests.
+jest.mock('node:os', () => {
+  const actual = jest.requireActual('node:os') as typeof os;
+  const nodePath = jest.requireActual('node:path') as typeof path;
+  return {
+    ...actual,
+    homedir: () => nodePath.join(actual.tmpdir(), `browserpaw-stdio-test-home-${process.pid}`),
+  };
+});
 if (!process.env.BROWSERPAW_HOME) {
   process.env.BROWSERPAW_HOME = path.join(os.tmpdir(), '.browserpaw-stdio-test');
 }
