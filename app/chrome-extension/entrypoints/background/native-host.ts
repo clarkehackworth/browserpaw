@@ -1,5 +1,6 @@
 import { formatErrorForAgent, NativeMessageType } from 'chrome-mcp-shared';
 import { BACKGROUND_MESSAGE_TYPES } from '@/common/message-types';
+import { handleUrlPolicyMessage } from './url-policy';
 import { NATIVE_HOST, STORAGE_KEYS, ERROR_MESSAGES, SUCCESS_MESSAGES } from '@/common/constants';
 import { checkBridgeOwnership } from '@/common/bridge-ownership';
 import { handleCallTool } from './tools';
@@ -632,6 +633,19 @@ export function connectNativeHost(port: number = NATIVE_HOST.DEFAULT_PORT): bool
               payload: { status: 'success', agentControlEnabled: enabled },
             });
           }
+        } else if (typeof message.type === 'string' && message.type.startsWith('url_policy_')) {
+          // Fork: MControlProgram's managed URL policy (native server /url-policy routes).
+          let payload: any;
+          try {
+            payload = {
+              status: 'success',
+              ...(await handleUrlPolicyMessage(message.type, message.payload)),
+            };
+          } catch (e) {
+            payload = { status: 'error', error: e instanceof Error ? e.message : String(e) };
+          }
+          if (message.requestId)
+            safePostMessage(nativePort, { responseToRequestId: message.requestId, payload });
         } else if (message.type === 'get_agent_control') {
           const session = await chrome.storage.session.get('agentControlEnabled');
           const enabled = session.agentControlEnabled !== false;

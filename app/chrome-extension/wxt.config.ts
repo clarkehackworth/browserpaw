@@ -58,6 +58,8 @@ export default defineConfig({
       'scripting',
       'downloads',
       'webRequest',
+      'declarativeNetRequest',
+      'declarativeNetRequestFeedback',
       'webNavigation',
       'debugger',
       'storage',

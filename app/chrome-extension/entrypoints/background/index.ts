@@ -1,5 +1,6 @@
 import { initNativeHostListener } from './native-host';
 import { initWatchdogs } from './watchdogs';
+import { initUrlPolicy } from './url-policy';
 
 /**
  * Background script entry point
@@ -9,4 +10,5 @@ export default defineBackground(() => {
   // Initialize core services
   initNativeHostListener();
   initWatchdogs();
+  void initUrlPolicy().catch((e) => console.error('[url-policy] init failed', e));
 });

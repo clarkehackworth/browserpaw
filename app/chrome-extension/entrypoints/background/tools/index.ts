@@ -1,5 +1,6 @@
 import { createErrorResponse, type ToolCallContext } from '@/common/tool-handler';
 import { ERROR_MESSAGES } from '@/common/constants';
+import { beginCall, claimTab, takeCaller } from '../url-policy';
 import { formatErrorForAgent, normalizeIncomingToolName, TOOL_SCHEMAS } from 'chrome-mcp-shared';
 import * as browserTools from './browser';
 import { tabFaviconManager } from './browser/tab-favicon';
@@ -57,8 +58,12 @@ export const handleCallTool = async (param: ToolCallParam, context?: ToolCallCon
     toolSchemasMap.get(normalized.canonicalBackendName) || toolSchemasMap.get(param.name);
   const schemaProperties = (schema?.inputSchema as any)?.properties || {};
 
+  let endCall = () => {};
   try {
     const args = param.args ?? {};
+    // Fork: MControlProgram's caller identity for URL-policy attribution; removed before the tool sees args.
+    const caller = takeCaller(args);
+    endCall = beginCall(caller, args.tabId);
     // Strict schema-driven argument coercion: only coerce when explicitly declared as boolean or number/integer
     for (const key of Object.keys(args)) {
       const val = args[key];
@@ -106,6 +111,7 @@ export const handleCallTool = async (param: ToolCallParam, context?: ToolCallCon
     }
     if (targetTabId) {
       tabFaviconManager.markTabActive(targetTabId);
+      claimTab(targetTabId, caller);
     }
     return result;
   } catch (error) {
@@ -117,5 +123,7 @@ export const handleCallTool = async (param: ToolCallParam, context?: ToolCallCon
         ? formatErrorForAgent(error, { context: `Tool ${param.name} failed` })
         : ERROR_MESSAGES.TOOL_EXECUTION_FAILED,
     );
+  } finally {
+    endCall();
   }
 };

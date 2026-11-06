@@ -327,6 +327,46 @@ export class Server {
       }
     });
 
+    // Fork: managed URL policy for MControlProgram. Plain routes behind the bridge token, deliberately
+    // not MCP tools (agents must not be able to change their own rules). Stateless relay to the extension.
+    const urlPolicy = async (type: string, payload: unknown, reply: FastifyReply) => {
+      if (!this.nativeHost || !this.isRunning)
+        return reply
+          .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+          .send({ status: 'error', error: ERROR_MESSAGES.NATIVE_HOST_NOT_AVAILABLE });
+      try {
+        const r = await this.nativeHost.sendRequestToExtensionAndWait(
+          payload ?? {},
+          type,
+          TIMEOUTS.EXTENSION_REQUEST_TIMEOUT,
+        );
+        return reply
+          .status(r?.status === 'error' ? HTTP_STATUS.BAD_REQUEST : HTTP_STATUS.OK)
+          .send(r);
+      } catch (error) {
+        return reply
+          .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
+          .send({ status: 'error', error: (error as Error).message });
+      }
+    };
+    this.fastify.put(
+      '/url-policy',
+      async (req: FastifyRequest<{ Body: unknown }>, reply: FastifyReply) =>
+        urlPolicy('url_policy_set', req.body, reply),
+    );
+    this.fastify.get('/url-policy/state', async (_req: FastifyRequest, reply: FastifyReply) =>
+      urlPolicy('url_policy_state', {}, reply),
+    );
+    this.fastify.get(
+      '/url-policy/events',
+      async (req: FastifyRequest<{ Querystring: Record<string, string> }>, reply: FastifyReply) =>
+        urlPolicy(
+          'url_policy_events',
+          { after: req.query.after, epoch: req.query.epoch, limit: req.query.limit },
+          reply,
+        ),
+    );
+
     // POST /agent-control: Update Agent Control switch status
     this.fastify.post(
       '/agent-control',
