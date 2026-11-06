@@ -224,6 +224,12 @@ describe('agent attribution', () => {
     expect(m.takeEvents(999, 'old-epoch').events.map((e) => e.seq)).toEqual([4]);
   });
 
+  it("nav guard leaves the user's own tabs alone", () => {
+    c.webNavigation.onBeforeNavigate.fire({ tabId: 40, frameId: 0, url: 'chrome://extensions/' });
+    expect(c.tabs.update).not.toHaveBeenCalled();
+    expect(m.takeEvents(0, m.policyState().epoch).events).toEqual([]);
+  });
+
   it('nav guard blocks non-network schemes and logs them', () => {
     m.beginCall(A, 5);
     c.webNavigation.onBeforeNavigate.fire({ tabId: 5, frameId: 0, url: 'file:///etc/passwd' });

@@ -448,8 +448,11 @@ function registerListeners() {
   );
 
   // Non-network schemes never reach DNR. Best effort: the frame may start loading before this fires.
+  // Only in agent tabs (owned, or the single agent driving the browser right now): the person at a headed
+  // browser can still open chrome://extensions, chrome://settings, file:// in their own tabs.
   chrome.webNavigation.onBeforeNavigate.addListener((d) => {
     if (/^(https?|wss?):/i.test(d.url)) return;
+    if (!attribution(d.tabId).agentVia) return;
     const v = browserVerdict(
       d.url,
       current?.rules ?? [],
