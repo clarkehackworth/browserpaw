@@ -409,6 +409,8 @@ function registerListeners() {
     if (rule.rulesetId !== '_dynamic') return;
     const lbl = labels.get(rule.ruleId);
     if (!lbl || rule.ruleId === ID_BRIDGE || (rule.ruleId >= 1000 && rule.ruleId % 2 === 1)) return; // allow matches are logged below
+    // Non-web schemes (file:) also hit the catch-all; the nav guard logs those with the real reason.
+    if (!/^(https?|wss?):/i.test(request.url)) return;
     record({
       tabId: request.tabId,
       type: request.type,

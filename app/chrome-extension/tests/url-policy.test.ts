@@ -228,7 +228,13 @@ describe('agent attribution', () => {
     m.beginCall(A, 5);
     c.webNavigation.onBeforeNavigate.fire({ tabId: 5, frameId: 0, url: 'file:///etc/passwd' });
     expect(c.tabs.update).toHaveBeenCalledWith(5, { url: 'about:blank' });
-    expect(m.takeEvents(0, m.policyState().epoch).events[0]).toMatchObject({
+    c.declarativeNetRequest.onRuleMatchedDebug.fire({
+      request: { tabId: 5, type: 'main_frame', url: 'file:///etc/passwd' },
+      rule: { ruleId: 1, rulesetId: '_dynamic' },
+    });
+    const evs = m.takeEvents(0, m.policyState().epoch).events;
+    expect(evs).toHaveLength(1); // the catch-all DNR match for file: is not logged twice
+    expect(evs[0]).toMatchObject({
       via: 'nav-guard',
       blocked: 'scheme: file:',
       principal: 'alice',
