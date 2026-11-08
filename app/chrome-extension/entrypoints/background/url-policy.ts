@@ -360,7 +360,7 @@ function persistSoon() {
     void chrome.storage.session
       .set({ urlPolicyRuntime: { epoch, seq, events, owners: [...owners] } })
       .catch(() => {});
-  }, 1000);
+  }, 150); // short: events in the debounce window are lost if the service worker is killed
 }
 
 // ---------- listeners ----------
@@ -375,7 +375,10 @@ async function loadState() {
   const rt = (await chrome.storage.session.get('urlPolicyRuntime')).urlPolicyRuntime as any;
   if (rt?.epoch) {
     epoch = rt.epoch;
-    seq = Math.max(seq, rt.seq ?? 0);
+    // Events recorded before this load finished were numbered from 0: renumber them after the restored ones.
+    const base = rt.seq ?? 0;
+    for (const e of events) e.seq += base;
+    seq += base;
     events = [...(rt.events ?? []), ...events];
     for (const [k, v] of rt.owners ?? []) if (!owners.has(k)) owners.set(k, v); // anything set since wake-up is newer
   } else if (!epoch) epoch = crypto.randomUUID();
